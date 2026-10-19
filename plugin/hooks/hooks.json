@@ -1,0 +1,17 @@
+{
+  "description": "actually-done: push guard and done-ness enforcement",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-bash.sh\"",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}

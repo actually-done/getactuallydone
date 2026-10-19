@@ -1,0 +1,8 @@
+{
+  "name": "actually-done",
+  "owner": { "name": "Suchit Chopade" },
+  "description": "Push guard, affected-test Stop hook, and CI-based verification for AI coding agents.",
+  "plugins": [
+    { "name": "actually-done", "source": "./plugin" }
+  ]
+}
