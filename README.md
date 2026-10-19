@@ -111,6 +111,7 @@ ruff check .
 mypy src
 ```
 
-See [`ROADMAP.md`](ROADMAP.md) for what's deliberately out of scope for v0.1, and
+See [`docs/SETUP.md`](docs/SETUP.md) for the full setup and adoption-order walkthrough,
+[`ROADMAP.md`](ROADMAP.md) for what's deliberately out of scope for v0.1, and
 [`docs/DECISIONS.md`](docs/DECISIONS.md) for the research behind the hook/permission
 design choices.
