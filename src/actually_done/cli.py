@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from actually_done import changes, fast, guard, hookio, state
+from actually_done import changes, fast, full, guard, hookio, init, state
 from actually_done import config as config_mod
 
 
@@ -98,14 +98,57 @@ def _cmd_hook_stop(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_verify(args: argparse.Namespace) -> int:
-    repo_root = Path.cwd()
-    config = config_mod.load_config(repo_root)
+def _cmd_verify_fast(repo_root: Path, config: config_mod.Config) -> int:
     result = fast.run_fast_tier(repo_root, config)
     print(result.summary)
     if result.details:
         print(result.details)
     return 0 if result.status == "pass" else 1
+
+
+def _cmd_verify_full(args: argparse.Namespace, repo_root: Path, config: config_mod.Config) -> int:
+    if not args.base:
+        print("error: --tier full requires --base <ref-or-path>", file=sys.stderr)
+        return 2
+    with full.materialize_base(repo_root, args.base) as base_root:
+        result, evidence = full.run_full_tier(repo_root, base_root, config, base_ref=args.base)
+    print(full.render_evidence_markdown(evidence, result))
+    return 0 if result.status == "pass" else 1
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    repo_root = Path.cwd()
+    config = config_mod.load_config(repo_root)
+    if args.tier == "full":
+        return _cmd_verify_full(args, repo_root, config)
+    return _cmd_verify_fast(repo_root, config)
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    repo_root = Path.cwd()
+    path = repo_root / ".verify" / "approved"
+    existing: set[str] = set()
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            entry = line.split("#", 1)[0].strip()
+            if entry:
+                existing.add(entry)
+    existing.update(args.test_ids)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
+    print(f"approved {len(args.test_ids)} test id(s); {len(existing)} total in {path}")
+    return 0
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    report = init.run_init(Path.cwd(), force=args.force)
+    for path in report.written:
+        print(f"wrote {path}")
+    for path in report.appended:
+        print(f"updated {path}")
+    for path in report.skipped:
+        print(f"skipped {path} (already present; pass --force to overwrite)")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,7 +161,18 @@ def build_parser() -> argparse.ArgumentParser:
     hook_subparsers.add_parser("stop", help="Stop hook: block on fixable test failures")
 
     verify_parser = subparsers.add_parser("verify", help="Run the verifier directly")
-    verify_parser.add_argument("--tier", choices=["fast"], default="fast")
+    verify_parser.add_argument("--tier", choices=["fast", "full"], default="fast")
+    verify_parser.add_argument(
+        "--base", default=None, help="Base ref or checkout path (required for --tier full)"
+    )
+
+    approve_parser = subparsers.add_parser(
+        "approve", help="Approve test ids for removal/skipping in the full tier"
+    )
+    approve_parser.add_argument("test_ids", nargs="+", metavar="TEST_ID")
+
+    init_parser = subparsers.add_parser("init", help="Scaffold CI, CODEOWNERS, and rules files")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite existing files")
 
     return parser
 
@@ -133,6 +187,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_hook_stop(args)
     if args.command == "verify":
         return _cmd_verify(args)
+    if args.command == "approve":
+        return _cmd_approve(args)
+    if args.command == "init":
+        return _cmd_init(args)
 
     parser.error(f"unknown command: {args.command} {getattr(args, 'hook_name', '')}".strip())
     return 2

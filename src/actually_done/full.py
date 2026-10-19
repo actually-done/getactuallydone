@@ -1,0 +1,386 @@
+"""Full tier: the decisive, CI-only check. Base's test files decide what has to pass -
+the PR can add new tests or change production code, but can never weaken an existing
+test, sneak in a new conftest.py, or quietly drop tests without an approved removal.
+
+The approach: build a sandbox that's the PR's full source tree, but with every test
+file that exists in both trees, every conftest.py/pytest.ini/setup.cfg, and
+tests/oracle/ replaced by base's content (denying any such grader-path file the PR
+introduces that base doesn't have at all). A test file the PR deletes stays deleted -
+the test-count check, not a silent resurrection, is what catches an unapproved
+removal. Run pytest there.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from actually_done.config import Config
+
+_SKIP_MARKER_RE = re.compile(r"@pytest\.mark\.(?:skip|skipif|xfail)\b|pytest\.(?:skip|xfail)\s*\(")
+_GRADER_CONFIG_NAMES = {"conftest.py", "pytest.ini", "setup.cfg"}
+_SANDBOX_EXCLUDES = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".actually-done",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+}
+_COLLECTED_RE = re.compile(r"(\d+)\s+tests?\s+collected")
+_TAIL_LINES = 80
+
+
+@dataclass(frozen=True)
+class FullResult:
+    status: str  # "pass" | "fail" | "error"
+    summary: str
+    details: str = ""
+
+
+@dataclass(frozen=True)
+class JunitReport:
+    tests: int = 0
+    failures: int = 0
+    errors: int = 0
+    skipped: int = 0
+
+
+@dataclass
+class Evidence:
+    base_ref: str
+    pr_commit: str
+    commands: list[tuple[str, int]] = field(default_factory=list)
+    new_test_files: int = 0
+    tests_collected: int = 0
+
+
+def read_approved(base_root: Path) -> set[str]:
+    """Test node ids a human has approved for removal or skipping, read from base."""
+    path = base_root / ".verify" / "approved"
+    if not path.is_file():
+        return set()
+    ids = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if entry:
+            ids.add(entry)
+    return ids
+
+
+@contextmanager
+def materialize_base(pr_root: Path, base: str) -> Iterator[Path]:
+    """Yield a directory holding `base`'s files: used as-is if it names an existing
+    directory, otherwise checked out via a detached git worktree and cleaned up after."""
+    candidate = Path(base)
+    if candidate.is_dir():
+        yield candidate
+        return
+
+    with tempfile.TemporaryDirectory(prefix="actually-done-base-") as tmp:
+        worktree = Path(tmp) / "base"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), base],
+            cwd=pr_root,
+            check=True,
+            capture_output=True,
+        )
+        try:
+            yield worktree
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree)],
+                cwd=pr_root,
+                check=False,
+                capture_output=True,
+            )
+
+
+def run_full_tier(
+    pr_root: Path, base_root: Path, config: Config, base_ref: str = ""
+) -> tuple[FullResult, Evidence]:
+    evidence = Evidence(base_ref=base_ref or str(base_root), pr_commit=_rev_parse(pr_root))
+    approved = read_approved(base_root)
+
+    base_tests = _find_test_files(base_root, config.unit_test_path)
+    pr_tests = _find_test_files(pr_root, config.unit_test_path)
+    new_tests = pr_tests - base_tests
+    common_tests = base_tests & pr_tests
+    evidence.new_test_files = len(new_tests)
+
+    skip_violations = sorted(
+        rel
+        for rel in new_tests
+        if _SKIP_MARKER_RE.search((pr_root / rel).read_text(encoding="utf-8", errors="replace"))
+    )
+    if skip_violations:
+        result = FullResult(
+            status="fail",
+            summary=f"{len(skip_violations)} newly added test file(s) carry a skip/xfail marker",
+            details="\n".join(skip_violations),
+        )
+        return result, evidence
+
+    with tempfile.TemporaryDirectory(prefix="actually-done-sandbox-") as tmp:
+        sandbox = Path(tmp) / "sandbox"
+        _build_sandbox(sandbox, pr_root, base_root, config, common_tests)
+
+        baseline_count = _collect_count(base_root, config.unit_test_path, evidence)
+
+        junit_path = Path(tmp) / "junit-unit.xml"
+        returncode, output = _run_pytest(
+            sandbox, config.unit_test_path, junit_path, evidence, deselect=approved
+        )
+        report = _parse_junit(junit_path)
+        evidence.tests_collected = report.tests
+
+        mismatch = _cross_check(returncode, report)
+        if mismatch:
+            result = FullResult(status="error", summary=mismatch, details=_tail(output))
+            return result, evidence
+
+        expected_minimum = baseline_count - len(approved)
+        if report.tests < expected_minimum:
+            result = FullResult(
+                status="fail",
+                summary=(
+                    f"test count dropped: expected at least {expected_minimum}, "
+                    f"got {report.tests}"
+                ),
+                details=_tail(output),
+            )
+            return result, evidence
+
+        if report.failures > 0 or report.errors > 0:
+            result = FullResult(
+                status="fail",
+                summary=f"{report.failures + report.errors} unit test(s) failed",
+                details=_tail(output),
+            )
+            return result, evidence
+
+        oracle_dir = base_root / "tests" / "oracle"
+        if oracle_dir.is_dir() and any(oracle_dir.rglob("test_*.py")):
+            oracle_junit = Path(tmp) / "junit-oracle.xml"
+            oracle_rc, oracle_output = _run_pytest(
+                sandbox, "tests/oracle", oracle_junit, evidence, extra_args=["--runxfail"]
+            )
+            if oracle_rc != 0:
+                result = FullResult(
+                    status="fail", summary="oracle test(s) failed", details=_tail(oracle_output)
+                )
+                return result, evidence
+
+    result = FullResult(status="pass", summary=f"{report.tests} test(s) passed")
+    return result, evidence
+
+
+def render_evidence_markdown(evidence: Evidence, result: FullResult) -> str:
+    lines = [
+        "### actually-done full-tier evidence",
+        "",
+        f"- Base: `{evidence.base_ref}`",
+        f"- PR commit: `{evidence.pr_commit}`",
+        f"- New test files: {evidence.new_test_files}",
+        f"- Tests collected: {evidence.tests_collected}",
+        f"- Result: **{result.status}** - {result.summary}",
+        "",
+        "| Command | Exit code |",
+        "| --- | --- |",
+    ]
+    lines += [f"| `{cmd}` | {code} |" for cmd, code in evidence.commands]
+    if result.details:
+        lines += [
+            "",
+            "<details><summary>Details</summary>",
+            "",
+            "```",
+            result.details,
+            "```",
+            "</details>",
+        ]
+    return "\n".join(lines)
+
+
+def _rev_parse(repo_root: Path, ref: str = "HEAD") -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", ref], cwd=repo_root, capture_output=True, text=True
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ref
+
+
+def _find_test_files(root: Path, unit_test_path: str) -> set[str]:
+    base_dir = root / unit_test_path
+    if not base_dir.is_dir():
+        return set()
+    return {
+        p.relative_to(root).as_posix()
+        for p in base_dir.rglob("*.py")
+        if p.name.startswith("test_") or p.name.endswith("_test.py")
+    }
+
+
+def _is_excluded(path: Path, root: Path) -> bool:
+    return any(part in _SANDBOX_EXCLUDES for part in path.relative_to(root).parts)
+
+
+def _ignore_excludes(_dir: str, names: list[str]) -> set[str]:
+    return {n for n in names if n in _SANDBOX_EXCLUDES}
+
+
+def _build_sandbox(
+    sandbox: Path, pr_root: Path, base_root: Path, config: Config, common_tests: set[str]
+) -> None:
+    """The PR's full tree, except: every test file that exists in BOTH trees gets
+    base's content (so editing one changes nothing), and grader-config files are
+    locked the same way. A test file the PR deleted stays deleted here - leaving
+    that for the caller's test-count check to catch, rather than silently
+    resurrecting it, which would make that check meaningless.
+    """
+    shutil.copytree(pr_root, sandbox, ignore=_ignore_excludes)
+
+    for rel in common_tests:
+        dst = sandbox / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base_root / rel, dst)
+
+    _lock_grader_configs(sandbox, pr_root, base_root)
+
+    oracle_dst = sandbox / "tests" / "oracle"
+    if oracle_dst.exists():
+        shutil.rmtree(oracle_dst)
+    oracle_src = base_root / "tests" / "oracle"
+    if oracle_src.is_dir():
+        shutil.copytree(oracle_src, oracle_dst, ignore=_ignore_excludes)
+
+
+def _lock_grader_configs(sandbox: Path, pr_root: Path, base_root: Path) -> None:
+    """conftest.py / pytest.ini / setup.cfg: base's content wins everywhere it has one;
+    anything the PR introduces at a path base doesn't have at all is denied outright."""
+    pr_paths = {
+        p.relative_to(pr_root).as_posix()
+        for p in pr_root.rglob("*")
+        if p.name in _GRADER_CONFIG_NAMES and not _is_excluded(p, pr_root)
+    }
+    base_paths = {
+        p.relative_to(base_root).as_posix()
+        for p in base_root.rglob("*")
+        if p.name in _GRADER_CONFIG_NAMES and not _is_excluded(p, base_root)
+    }
+
+    for rel in base_paths:
+        dst = sandbox / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base_root / rel, dst)
+
+    for rel in pr_paths - base_paths:
+        dst = sandbox / rel
+        if dst.is_file():
+            dst.unlink()
+
+
+def _pytest_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    return env
+
+
+def _collect_count(cwd: Path, unit_test_path: str, evidence: Evidence) -> int:
+    """Collect-only test count, run with `cwd` set so relative imports (`from pkg
+    import ...`) resolve against that tree's own production code - not whatever
+    directory the calling process happened to be in."""
+    if not (cwd / unit_test_path).is_dir():
+        return 0
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+        unit_test_path,
+        "--override-ini=addopts=",
+        "-p",
+        "no:cacheprovider",
+    ]
+    completed = subprocess.run(
+        command, cwd=cwd, capture_output=True, text=True, env=_pytest_env()
+    )
+    evidence.commands.append((" ".join(command), completed.returncode))
+    match = _COLLECTED_RE.search(completed.stdout)
+    return int(match.group(1)) if match else 0
+
+
+def _run_pytest(
+    sandbox: Path,
+    test_path: str,
+    junit_path: Path,
+    evidence: Evidence,
+    deselect: set[str] | None = None,
+    extra_args: list[str] | None = None,
+) -> tuple[int, str]:
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        test_path,
+        "--override-ini=addopts=",
+        "-p",
+        "no:cacheprovider",
+        f"--junitxml={junit_path}",
+    ]
+    for test_id in sorted(deselect or ()):
+        command += ["--deselect", test_id]
+    if extra_args:
+        command += extra_args
+
+    completed = subprocess.run(
+        command, cwd=sandbox, capture_output=True, text=True, env=_pytest_env()
+    )
+    evidence.commands.append((" ".join(command), completed.returncode))
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def _parse_junit(path: Path) -> JunitReport:
+    if not path.is_file():
+        return JunitReport()
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return JunitReport()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    if suite is None:
+        return JunitReport()
+    return JunitReport(
+        tests=int(suite.get("tests", 0)),
+        failures=int(suite.get("failures", 0)),
+        errors=int(suite.get("errors", 0)),
+        skipped=int(suite.get("skipped", 0)),
+    )
+
+
+def _cross_check(returncode: int, report: JunitReport) -> str | None:
+    broken = report.failures > 0 or report.errors > 0
+    if returncode == 0 and broken:
+        return "pytest exited 0 but the JUnit report shows failures/errors - treating as broken"
+    if returncode == 5 and report.tests == 0:
+        return None  # "no tests collected" - consistent; the count check decides if that's OK
+    if returncode not in (0, 1):
+        return f"pytest exited with code {returncode} (not a normal pass/fail)"
+    return None
+
+
+def _tail(output: str) -> str:
+    return "\n".join(output.splitlines()[-_TAIL_LINES:])

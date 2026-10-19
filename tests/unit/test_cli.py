@@ -160,3 +160,58 @@ def test_verify_fast_tier_reports_failure(
     exit_code = cli.main(["verify", "--tier", "fast"])
     assert exit_code == 1
     assert "test_add" in capsys.readouterr().out
+
+
+def test_verify_full_tier_requires_base(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = cli.main(["verify", "--tier", "full"])
+    assert exit_code == 2
+    assert "--base" in capsys.readouterr().err
+
+
+def test_verify_full_tier_catches_hidden_break(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    (repo / "tests" / "test_pkg.py").write_text(
+        "import sys\nsys.path.insert(0, '.')\nfrom pkg import add\n\n"
+        "def test_add():\n    assert add(1, 2) == -1\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pr: break + hide")
+
+    exit_code = cli.main(["verify", "--tier", "full", "--base", base_sha])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "full-tier evidence" in out
+    assert "test_add" in out
+
+
+def test_approve_writes_verify_approved(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = cli.main(["approve", "tests/test_pkg.py::test_add"])
+    assert exit_code == 0
+    content = (repo / ".verify" / "approved").read_text(encoding="utf-8")
+    assert "tests/test_pkg.py::test_add" in content
+    assert "approved 1 test id(s)" in capsys.readouterr().out
+
+
+def test_approve_is_additive(repo: Path) -> None:
+    cli.main(["approve", "tests/a.py::test_x"])
+    cli.main(["approve", "tests/b.py::test_y"])
+    content = (repo / ".verify" / "approved").read_text(encoding="utf-8")
+    assert "tests/a.py::test_x" in content
+    assert "tests/b.py::test_y" in content
+
+
+def test_init_writes_scaffolding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    exit_code = cli.main(["init"])
+    assert exit_code == 0
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert (tmp_path / "CODEOWNERS").is_file()
+    assert (tmp_path / ".github" / "workflows" / "actually-done.yml").is_file()
