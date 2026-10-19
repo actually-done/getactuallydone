@@ -32,6 +32,32 @@ which `pytest` alone doesn't cover.
 - **Keep PRs scoped.** One commit per logical change is easier to review than one large
   diff - see this repo's own commit history for the expected granularity.
 
+## Releasing
+
+`.github/workflows/release.yml` runs on any tag matching `v*`: it re-runs the full test
+suite, checks the tag matches `pyproject.toml`'s `version` (and, separately,
+`test_version_consistency.py` keeps `pyproject.toml` and `plugin.json` in sync with each
+other), builds the sdist/wheel, and publishes to PyPI via
+[trusted publishing](https://docs.pypi.org/trusted-publishers/) - no API token is
+stored in this repo.
+
+One-time setup this workflow depends on, done on PyPI's side, not here:
+
+1. On PyPI, add a trusted publisher for this project: GitHub owner/repo
+   `actually-done/actually-done` (or wherever this ends up), workflow filename
+   `release.yml`, environment name `pypi`.
+2. Optionally, under this repo's Settings → Environments, create a `pypi` environment
+   and add required reviewers for a manual approval gate before every publish. The
+   workflow references this environment either way; it's a no-op if left unconfigured.
+
+To cut a release: bump the version in `pyproject.toml` and `plugin.json` together (the
+version-consistency test fails the PR otherwise), merge, then tag and push:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Design background
 
 `solution.md` is the design source. `docs/DECISIONS.md` records every place the
