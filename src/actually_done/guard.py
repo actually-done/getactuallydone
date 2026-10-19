@@ -10,10 +10,9 @@ the resulting program is `git` and its first positional argument is `push`.
 
 from __future__ import annotations
 
-import json
 import re
 import shlex
-from typing import IO, Any
+from typing import Any
 
 _SHELL_WRAPPERS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"}
 _GIT_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
@@ -26,15 +25,6 @@ _BLOCK_REASON = (
     "action, not an agent one (see solution.md, Agent identity) - ask the user to "
     "push themselves."
 )
-
-
-def read_hook_payload(stream: IO[str]) -> dict[str, Any]:
-    """Parse the PreToolUse hook's JSON payload from stdin. Empty input is treated as {}."""
-    raw = stream.read()
-    if not raw.strip():
-        return {}
-    payload = json.loads(raw)
-    return payload if isinstance(payload, dict) else {}
 
 
 def extract_bash_command(payload: dict[str, Any]) -> str | None:

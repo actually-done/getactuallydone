@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import io
-import json
-
 import pytest
 
 from actually_done import guard
@@ -47,16 +44,6 @@ def test_blocks_every_push_spelling(command: str) -> None:
 def test_allows_non_push_commands(command: str) -> None:
     blocked, _reason = guard.check_push(command)
     assert blocked is False
-
-
-def test_read_hook_payload_parses_json() -> None:
-    stream = io.StringIO(json.dumps({"tool_input": {"command": "git push"}}))
-    payload = guard.read_hook_payload(stream)
-    assert guard.extract_bash_command(payload) == "git push"
-
-
-def test_read_hook_payload_handles_empty_stdin() -> None:
-    assert guard.read_hook_payload(io.StringIO("")) == {}
 
 
 def test_extract_bash_command_missing_tool_input() -> None:
