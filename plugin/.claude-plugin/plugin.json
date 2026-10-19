@@ -4,5 +4,5 @@
   "version": "0.1.0",
   "description": "Make your coding agent prove it's done: push guard, affected-test Stop hook, and CI-based verification.",
   "author": { "name": "Suchit Chopade" },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

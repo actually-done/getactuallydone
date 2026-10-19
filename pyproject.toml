@@ -7,7 +7,7 @@ name = "actually-done"
 version = "0.1.0"
 description = "Make your coding agent prove it's done."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = []
 
