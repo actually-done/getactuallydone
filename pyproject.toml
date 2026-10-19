@@ -43,4 +43,4 @@ strict = true
 mypy_path = "src"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", "tests/attacks"]
