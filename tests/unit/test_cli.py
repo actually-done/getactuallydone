@@ -215,3 +215,55 @@ def test_init_writes_scaffolding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert (tmp_path / "AGENTS.md").is_file()
     assert (tmp_path / "CODEOWNERS").is_file()
     assert (tmp_path / ".github" / "workflows" / "actually-done.yml").is_file()
+
+
+def _run_hook_compact(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]
+) -> dict[str, object]:
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print", lambda *a, **k: printed.append(" ".join(str(x) for x in a))
+    )
+    exit_code = cli.main(["hook", "compact"])
+    assert exit_code == 0
+    return json.loads(printed[0])  # type: ignore[no-any-return]
+
+
+def test_hook_compact_reprints_agents_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "AGENTS.md").write_text("# Critical rules\n\n- never push\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    body = _run_hook_compact(monkeypatch, {"source": "compact"})
+
+    assert body["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "never push" in body["hookSpecificOutput"]["additionalContext"]
+
+
+def test_hook_compact_truncates_to_twenty_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("\n".join(f"line {i}" for i in range(50)), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    body = _run_hook_compact(monkeypatch, {"source": "compact"})
+
+    block = body["hookSpecificOutput"]["additionalContext"]
+    assert block.count("\n") == 19  # 20 lines
+    assert "line 19" in block
+    assert "line 20" not in block
+
+
+def test_hook_compact_noop_when_agents_md_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert _run_hook_compact(monkeypatch, {"source": "compact"}) == {}
+
+
+def test_hook_compact_noop_for_other_sessionstart_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert _run_hook_compact(monkeypatch, {"source": "startup"}) == {}

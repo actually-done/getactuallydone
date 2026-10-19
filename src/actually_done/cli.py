@@ -10,6 +10,8 @@ from pathlib import Path
 from actually_done import changes, fast, full, guard, hookio, init, state
 from actually_done import config as config_mod
 
+_MAX_COMPACT_LINES = 20
+
 
 def _cmd_hook_pre_bash(_args: argparse.Namespace) -> int:
     payload = hookio.read_payload(sys.stdin)
@@ -98,6 +100,33 @@ def _cmd_hook_stop(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hook_compact(_args: argparse.Namespace) -> int:
+    payload = hookio.read_payload(sys.stdin)
+    if payload.get("source") not in (None, "compact"):
+        print(json.dumps({}))
+        return 0
+
+    repo_root = Path(payload["cwd"]) if payload.get("cwd") else Path.cwd()
+    agents_md = repo_root / "AGENTS.md"
+    if not agents_md.is_file():
+        print(json.dumps({}))
+        return 0
+
+    lines = agents_md.read_text(encoding="utf-8").splitlines()
+    block = "\n".join(lines[:_MAX_COMPACT_LINES])
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": block,
+                }
+            }
+        )
+    )
+    return 0
+
+
 def _cmd_verify_fast(repo_root: Path, config: config_mod.Config) -> int:
     result = fast.run_fast_tier(repo_root, config)
     print(result.summary)
@@ -159,6 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
     hook_subparsers = hook_parser.add_subparsers(dest="hook_name", required=True)
     hook_subparsers.add_parser("pre-bash", help="PreToolUse hook: block git push")
     hook_subparsers.add_parser("stop", help="Stop hook: block on fixable test failures")
+    hook_subparsers.add_parser(
+        "compact", help="SessionStart(compact) hook: re-print AGENTS.md's rules block"
+    )
 
     verify_parser = subparsers.add_parser("verify", help="Run the verifier directly")
     verify_parser.add_argument("--tier", choices=["fast", "full"], default="fast")
@@ -185,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_hook_pre_bash(args)
     if args.command == "hook" and args.hook_name == "stop":
         return _cmd_hook_stop(args)
+    if args.command == "hook" and args.hook_name == "compact":
+        return _cmd_hook_compact(args)
     if args.command == "verify":
         return _cmd_verify(args)
     if args.command == "approve":
