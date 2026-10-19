@@ -35,9 +35,18 @@ def _load(repo_root: Path) -> dict[str, Any]:
 
 
 def _save(repo_root: Path, data: dict[str, Any]) -> None:
-    path = _state_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    """Best-effort: caching and the no-progress counter are optimizations, not
+    correctness requirements, so an unwritable state dir degrades silently (no
+    caching, the counter never persists across invocations) rather than crashing the
+    whole verifier - a crash here would otherwise take down fast.run_fast_tier and,
+    from there, the Stop hook's ability to report a real test failure at all.
+    """
+    try:
+        path = _state_path(repo_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def get_cached_result(repo_root: Path, tree_hash: str) -> dict[str, Any] | None:

@@ -36,9 +36,26 @@ def test_pre_bash_allows_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stderr == ""
 
 
-def test_pre_bash_allows_non_bash_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pre_bash_blocks_when_command_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This hook is matched to the Bash tool, so a payload with no tool_input.command
+    # means something is wrong, not that the command is safe - fail closed.
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"tool_input": {}})))
-    assert cli.main(["hook", "pre-bash"]) == 0
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print", lambda *a, **k: captured.append(" ".join(str(x) for x in a))
+    )
+    assert cli.main(["hook", "pre-bash"]) == 2
+    assert captured
+
+
+def test_pre_bash_blocks_on_empty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert cli.main(["hook", "pre-bash"]) == 2
+
+
+def test_pre_bash_blocks_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("not valid json {"))
+    assert cli.main(["hook", "pre-bash"]) == 2
 
 
 def _git(repo: Path, *args: str) -> None:

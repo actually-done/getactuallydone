@@ -14,18 +14,58 @@ _MAX_COMPACT_LINES = 20
 
 
 def _cmd_hook_pre_bash(_args: argparse.Namespace) -> int:
-    payload = hookio.read_payload(sys.stdin)
-    command = guard.extract_bash_command(payload)
-    if command is None:
+    """Fails closed (blocks) on anything it can't make sense of, not just a detected
+    push: this hook's matcher already scopes it to Bash tool calls, so a payload with
+    no parseable `tool_input.command` - or any other unexpected failure - means
+    something is wrong, not that the command is safe. See docs/DECISIONS.md, D9/the
+    fail-open audit.
+    """
+    try:
+        payload = hookio.read_payload(sys.stdin)
+        command = guard.extract_bash_command(payload)
+        if command is None:
+            print(
+                "actually-done: could not read the Bash command from the hook payload. "
+                "Blocking out of caution.",
+                file=sys.stderr,
+            )
+            return 2
+        blocked, reason = guard.check_push(command)
+        if blocked:
+            print(reason, file=sys.stderr)
+            return 2
         return 0
-    blocked, reason = guard.check_push(command)
-    if blocked:
-        print(reason, file=sys.stderr)
+    except Exception as exc:
+        # A security gate must fail closed on any surprise, not crash its way open.
+        print(
+            f"actually-done: push guard crashed ({exc!r}). Blocking out of caution.",
+            file=sys.stderr,
+        )
         return 2
-    return 0
 
 
 def _cmd_hook_stop(_args: argparse.Namespace) -> int:
+    """Always exits 0 with valid JSON (D3): a crash here must surface as a halt,
+    never as a non-zero exit that depends on the shell wrapper alone to catch it -
+    this is the Python layer's own safety net, independent of plugin/scripts/stop.sh.
+    """
+    try:
+        return _hook_stop_body()
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "systemMessage": (
+                        f"actually-done: the verifier crashed ({exc!r}). Please check "
+                        "manually before trusting this turn."
+                    )
+                }
+            )
+        )
+        return 0
+
+
+def _hook_stop_body() -> int:
     payload = hookio.read_payload(sys.stdin)
     repo_root = Path(payload["cwd"]) if payload.get("cwd") else Path.cwd()
 
@@ -101,6 +141,17 @@ def _cmd_hook_stop(_args: argparse.Namespace) -> int:
 
 
 def _cmd_hook_compact(_args: argparse.Namespace) -> int:
+    """Not a gate - nothing here blocks or halts anything, so any failure (a crash,
+    a payload we can't parse) degrades to a clean no-op {} rather than propagating.
+    """
+    try:
+        return _hook_compact_body()
+    except Exception:
+        print(json.dumps({}))
+        return 0
+
+
+def _hook_compact_body() -> int:
     payload = hookio.read_payload(sys.stdin)
     if payload.get("source") not in (None, "compact"):
         print(json.dumps({}))

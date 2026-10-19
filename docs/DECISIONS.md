@@ -55,6 +55,57 @@ Two distinct consequences, neither fixed by swapping bash for a Python wrapper s
 
 **Decision:** document this precisely (README, SETUP.md) rather than claim a blanket OS boundary. Users who need the push guard's protection on Windows should set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` to disable the PowerShell tool, in addition to having Git for Windows installed. The full-tier CI check is unaffected either way, since it runs in GitHub Actions on a Linux runner regardless of the developer's local OS or tool choice - it remains the actual backstop. A PowerShell-native equivalent of `guard.py` (a second PreToolUse entry matched to `"PowerShell"`) would close gap 2 and is a reasonable v0.2 addition, but is new scope, not a release-readiness fix, so it's in `ROADMAP.md` instead.
 
+## D10: Fail-open audit - what's fixed, what's N/A, and the one case that can't be closed
+
+Audited every hook handler (`pre-bash`, `stop`, `compact`) against: not installed,
+python missing from `PATH`, malformed/empty stdin, verifier timeout, unwritable state
+dir, and an unexpected crash. Tests: `tests/unit/test_fail_open_audit.py`.
+
+**Two real bugs found and fixed, not just documented:**
+
+- `hookio.read_payload` let `json.JSONDecodeError` propagate on malformed (not just
+  empty) stdin. For `pre-bash`, an uncaught exception exits 1, and PreToolUse only
+  blocks on exit 2 - exit 1 is "non-blocking error, the action proceeds" per the hooks
+  reference. **Malformed stdin was silently letting the Bash command through.** Fixed
+  by catching the decode error in `read_payload` and treating it as `{}`, and
+  separately making `_cmd_hook_pre_bash` block (not allow) whenever it can't determine
+  the command at all, since the hook's own matcher already guarantees it's only ever
+  invoked for an actual Bash call.
+- `state._save` let `OSError` (an unwritable `.actually-done/` dir) propagate up
+  through `fast.run_fast_tier` and crash `_cmd_hook_stop` before my hardening below
+  existed. Fixed by making `_save` best-effort (caching and the no-progress counter are
+  optimizations, not correctness requirements) - a real test failure is still reported
+  and blocked even when nothing can be persisted to disk.
+
+**Defense in depth added beyond the two real bugs**, since a security gate should fail
+closed on *any* surprise, not just the ones found today: `_cmd_hook_pre_bash` and
+`_cmd_hook_stop` each wrap their entire body in `try/except Exception`, converting any
+crash into a block/halt respectively rather than relying solely on the shell wrapper to
+catch it. `pre-bash.sh` no longer blindly relays `actually-done`'s exit code - only 0
+and 2 pass through; anything else is treated as a crash and forced to exit 2.
+
+**N/A, with reasons** (not fixed because there's nothing there to fix): "python missing
+from `PATH`" and "verifier exceeds timeout" don't apply to `pre-bash`/`compact` - neither
+spawns a subprocess at all (`guard.py` is pure string parsing; `compact` only reads a
+file). "Unwritable state dir" doesn't apply to `pre-bash`/`compact` either - neither
+touches `state.py`. For `stop`, "python missing from `PATH`" is a non-issue by
+construction, not luck: `fast.py` spawns pytest via `sys.executable`, the absolute path
+of the already-running interpreter, never a bare `"python"` resolved through `PATH` -
+tested explicitly (`test_fast_tier_does_not_depend_on_python_being_on_path`) so a future
+change can't regress it unnoticed.
+
+**One case that genuinely can't be made to fail closed**: `compact` degrades to a clean
+no-op (`{}`) on a crash or bad input, rather than halting. This is intentional, not a
+gap - `SessionStart` doesn't gate anything, so there's no "stop" to force; a user just
+doesn't get the critical-rules block re-injected that one time. Documented here per the
+audit's own ask, not left as a silent assumption.
+
+**The one failure mode no amount of code can close**: if `bash` itself doesn't exist at
+all (no Git for Windows - D9), none of the three hook scripts can start, and there is no
+cross-platform, dependency-free interpreter left to report that failure with. This is
+why D9 settles for documenting the requirement rather than chasing a wrapper language
+that would have the identical problem under a different name.
+
 ## Not re-verified (out of scope for v0.1, noted for ROADMAP)
 
 Mutation testing, size/complexity/duplication gates, held-out tests, and multi-agent adapters (Cursor/Codex/Copilot hook formats) are explicitly out of scope per the build prompt and were not researched against their respective docs. If a future version adds them, re-fetch Cursor's and Copilot's hook references rather than trusting solution.md's summaries, since only Claude Code's docs were verified here.
