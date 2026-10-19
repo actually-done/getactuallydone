@@ -6,12 +6,15 @@ no-progress counter for consecutive identical test failures. Stored at
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 _STATE_DIR = ".actually-done"
 _STATE_FILE = "state.json"
 _MAX_CACHE_ENTRIES = 10
+_SAVE_RETRY_ATTEMPTS = 3
+_SAVE_RETRY_DELAY_SECONDS = 0.1
 
 
 class StateUnwritable(OSError):
@@ -51,12 +54,24 @@ def _load(repo_root: Path) -> dict[str, Any]:
 
 
 def _save(repo_root: Path, data: dict[str, Any]) -> None:
+    """A few short retries before giving up: a sync client (OneDrive, Dropbox) or an
+    antivirus scanner can hold a transient lock on a file under `.actually-done/` for
+    a moment, and since `record_attempt` now turns a write failure into a halt
+    (rather than silently degrading), a momentary lock must not be mistaken for a
+    genuinely unwritable directory.
+    """
     path = _state_path(repo_root)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
-    except OSError as exc:
-        raise StateUnwritable(path) from exc
+    last_exc: OSError | None = None
+    for attempt in range(_SAVE_RETRY_ATTEMPTS):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data), encoding="utf-8")
+            return
+        except OSError as exc:
+            last_exc = exc
+            if attempt < _SAVE_RETRY_ATTEMPTS - 1:
+                time.sleep(_SAVE_RETRY_DELAY_SECONDS)
+    raise StateUnwritable(path) from last_exc
 
 
 def get_cached_result(repo_root: Path, tree_hash: str) -> dict[str, Any] | None:

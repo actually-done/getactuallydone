@@ -21,7 +21,10 @@ Scope summary, checked against each hook's actual implementation:
   immediately rather than block - if it can never persist, it can never reach
   its threshold either, so a block-forever loop would follow otherwise (Claude
   Code's 8-consecutive-block cap doesn't save us: it resets on every tool call,
-  and the agent keeps calling tools while trying to fix the failure)
+  and the agent keeps calling tools while trying to fix the failure). `_save`
+  retries a few times first, so a transient lock from a sync client (OneDrive,
+  Dropbox) or an antivirus scanner doesn't get mistaken for a genuinely
+  unwritable directory and misreported as a halt
 - unexpected crash: tested for all three
 """
 
@@ -171,6 +174,7 @@ def test_stop_halts_immediately_with_unwritable_state_dir(
     so it could never reach its 3-strikes threshold - blocking would never resolve
     on its own. This must halt on the very first call, not block.
     """
+    monkeypatch.setattr(state, "_SAVE_RETRY_DELAY_SECONDS", 0.0)
     _init_base_repo(tmp_path)
     (tmp_path / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
     (tmp_path / ".actually-done").write_text("blocking file, not a directory", encoding="utf-8")
@@ -186,22 +190,50 @@ def test_stop_halts_immediately_with_unwritable_state_dir(
 
 
 def test_state_cache_and_reset_do_not_raise_when_state_dir_is_unwritable(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Caching and the pass-path reset are optimizations, not correctness
     requirements, so they degrade silently - only record_attempt must surface the
     failure (see test_stop_halts_immediately_with_unwritable_state_dir).
     """
+    monkeypatch.setattr(state, "_SAVE_RETRY_DELAY_SECONDS", 0.0)
     (tmp_path / ".actually-done").write_text("blocking file", encoding="utf-8")
     state.set_cached_result(tmp_path, "abc", {"status": "pass"})  # must not raise
     state.reset_attempts(tmp_path)  # must not raise
 
 
-def test_record_attempt_raises_state_unwritable(tmp_path: Path) -> None:
+def test_record_attempt_raises_state_unwritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(state, "_SAVE_RETRY_DELAY_SECONDS", 0.0)
     (tmp_path / ".actually-done").write_text("blocking file", encoding="utf-8")
     with pytest.raises(state.StateUnwritable) as excinfo:
         state.record_attempt(tmp_path, ["tests/test_x.py::test_y"])
     assert "state dir not writable" in str(excinfo.value)
+
+
+def test_record_attempt_survives_a_transient_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A OneDrive/Dropbox sync client or an antivirus scanner can hold a file under
+    `.actually-done/` locked for a moment - that must not be mistaken for a
+    genuinely unwritable directory and turned into a false halt.
+    """
+    monkeypatch.setattr(state, "_SAVE_RETRY_DELAY_SECONDS", 0.0)
+    attempts = {"n": 0}
+    real_write_text = Path.write_text
+
+    def flaky_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise PermissionError("simulated transient lock (e.g. a sync client)")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+
+    count = state.record_attempt(tmp_path, ["tests/test_x.py::test_y"])  # must not raise
+    assert count == 1
+    assert attempts["n"] == 2  # failed once, then recovered on retry
 
 
 def test_fast_tier_does_not_depend_on_python_being_on_path(

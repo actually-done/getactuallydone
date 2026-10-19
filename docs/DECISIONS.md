@@ -116,6 +116,20 @@ cross-platform, dependency-free interpreter left to report that failure with. Th
 why D9 settles for documenting the requirement rather than chasing a wrapper language
 that would have the identical problem under a different name.
 
+**Addendum - a transient lock isn't the same as "unwritable"**: on Windows specifically,
+a sync client (OneDrive, Dropbox) or an antivirus scanner can hold a brief lock on a file
+under `.actually-done/`, and once `record_attempt`'s write failure became a halt rather
+than a silent degrade, a momentary lock risked being misreported as the same thing as a
+genuinely unwritable directory - a false halt over nothing. `state._save` now retries a
+few times (`_SAVE_RETRY_ATTEMPTS`, `_SAVE_RETRY_DELAY_SECONDS`) before raising
+`StateUnwritable`, confirmed to both recover from a one-shot transient failure
+(`test_record_attempt_survives_a_transient_lock`) and still correctly raise once the
+directory is genuinely blocked (the existing `test_record_attempt_raises_state_unwritable`,
+which creates a file where the directory needs to go - that doesn't clear on retry).
+Found by testing this repo's own checkout, which happens to sit under OneDrive at a path
+containing a space (`C:\Users\...\OneDrive\...`) - exactly the two conditions (OneDrive
+sync, a space in the path) worth testing on Windows before trusting either claim.
+
 ## Not re-verified (out of scope for v0.1, noted for ROADMAP)
 
 Mutation testing, size/complexity/duplication gates, held-out tests, and multi-agent adapters (Cursor/Codex/Copilot hook formats) are explicitly out of scope per the build prompt and were not researched against their respective docs. If a future version adds them, re-fetch Cursor's and Copilot's hook references rather than trusting solution.md's summaries, since only Claude Code's docs were verified here.
