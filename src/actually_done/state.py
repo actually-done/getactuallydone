@@ -14,6 +14,22 @@ _STATE_FILE = "state.json"
 _MAX_CACHE_ENTRIES = 10
 
 
+class StateUnwritable(OSError):
+    """The `.actually-done/` state dir can't be written to.
+
+    Raised by `record_attempt` specifically (not swallowed there, unlike the cache):
+    if the no-progress counter can never persist across invocations, it can never
+    reach its threshold either, and the Stop hook would block the same failure
+    forever. Claude Code's own 8-consecutive-block cap doesn't save us here - it
+    resets on every tool call, and the agent keeps calling tools while it tries to
+    fix the failure. The caller must halt instead of block when this is raised.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"state dir not writable: {path}")
+        self.path = path
+
+
 def _state_path(repo_root: Path) -> Path:
     return repo_root / _STATE_DIR / _STATE_FILE
 
@@ -35,18 +51,12 @@ def _load(repo_root: Path) -> dict[str, Any]:
 
 
 def _save(repo_root: Path, data: dict[str, Any]) -> None:
-    """Best-effort: caching and the no-progress counter are optimizations, not
-    correctness requirements, so an unwritable state dir degrades silently (no
-    caching, the counter never persists across invocations) rather than crashing the
-    whole verifier - a crash here would otherwise take down fast.run_fast_tier and,
-    from there, the Stop hook's ability to report a real test failure at all.
-    """
+    path = _state_path(repo_root)
     try:
-        path = _state_path(repo_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as exc:
+        raise StateUnwritable(path) from exc
 
 
 def get_cached_result(repo_root: Path, tree_hash: str) -> dict[str, Any] | None:
@@ -55,17 +65,30 @@ def get_cached_result(repo_root: Path, tree_hash: str) -> dict[str, Any] | None:
 
 
 def set_cached_result(repo_root: Path, tree_hash: str, result: dict[str, Any]) -> None:
+    """Best-effort: caching is an optimization, not a correctness requirement, so an
+    unwritable state dir degrades silently here - a real test result still gets
+    reported and the verifier still runs (just without the cache hit next time).
+    """
     data = _load(repo_root)
     cache: dict[str, Any] = data["cache"]
     cache[tree_hash] = result
     if len(cache) > _MAX_CACHE_ENTRIES:
         for key in list(cache)[: len(cache) - _MAX_CACHE_ENTRIES]:
             del cache[key]
-    _save(repo_root, data)
+    try:
+        _save(repo_root, data)
+    except StateUnwritable:
+        pass
 
 
 def record_attempt(repo_root: Path, failing_tests: list[str]) -> int:
-    """Update the no-progress counter. Returns the new consecutive-same-failure count."""
+    """Update the no-progress counter. Returns the new consecutive-same-failure count.
+
+    Raises `StateUnwritable` if the count can't be persisted - deliberately not
+    swallowed here, unlike `set_cached_result`: a counter that silently never
+    increments is worse than no counter at all, since the caller would otherwise
+    keep blocking the same failure forever with no way out. The caller must halt.
+    """
     data = _load(repo_root)
     current = sorted(set(failing_tests))
     if current and current == data["last_failing_set"]:
@@ -78,7 +101,13 @@ def record_attempt(repo_root: Path, failing_tests: list[str]) -> int:
 
 
 def reset_attempts(repo_root: Path) -> None:
+    """Best-effort, like `set_cached_result`: this only runs on a pass, so a failed
+    reset doesn't risk the infinite-block scenario `record_attempt` guards against.
+    """
     data = _load(repo_root)
     data["attempt_count"] = 0
     data["last_failing_set"] = []
-    _save(repo_root, data)
+    try:
+        _save(repo_root, data)
+    except StateUnwritable:
+        pass

@@ -113,7 +113,22 @@ def _hook_stop_body() -> int:
         )
         return 0
 
-    attempt_count = state.record_attempt(repo_root, list(result.failing_tests))
+    try:
+        attempt_count = state.record_attempt(repo_root, list(result.failing_tests))
+    except state.StateUnwritable as exc:
+        print(
+            json.dumps(
+                {
+                    "systemMessage": (
+                        f"actually-done: {exc}. Needs human help: the no-progress "
+                        "counter can't be persisted, so this could block the same "
+                        "failure forever otherwise."
+                    )
+                }
+            )
+        )
+        return 0
+
     if attempt_count >= 3:
         print(
             json.dumps(

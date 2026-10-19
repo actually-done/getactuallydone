@@ -72,10 +72,20 @@ dir, and an unexpected crash. Tests: `tests/unit/test_fail_open_audit.py`.
   the command at all, since the hook's own matcher already guarantees it's only ever
   invoked for an actual Bash call.
 - `state._save` let `OSError` (an unwritable `.actually-done/` dir) propagate up
-  through `fast.run_fast_tier` and crash `_cmd_hook_stop` before my hardening below
-  existed. Fixed by making `_save` best-effort (caching and the no-progress counter are
-  optimizations, not correctness requirements) - a real test failure is still reported
-  and blocked even when nothing can be persisted to disk.
+  through `fast.run_fast_tier` and crash `_cmd_hook_stop`. First fix: made `_save`
+  best-effort, swallowing the error everywhere - a real test failure was still
+  reported and blocked even when nothing could be persisted. **That first fix was
+  itself a fail-open bug**, caught on review: if `record_attempt`'s write silently
+  never succeeds, the no-progress counter can never increment past 1, so it can
+  never reach its 3-strikes threshold - the Stop hook would block the exact same
+  failure forever. Claude Code's own 8-consecutive-block cap doesn't rescue this: it
+  resets on every tool call, and the agent keeps calling tools while trying (and
+  failing) to fix the problem. Corrected: `state.StateUnwritable` is raised by
+  `_save` and now deliberately *not* swallowed by `record_attempt` - only by
+  `set_cached_result` and `reset_attempts`, where a lost write is a pure
+  optimization with no liveness consequence. `_cmd_hook_stop` catches it specifically
+  and halts immediately (`"state dir not writable: <path>"`), never blocks, on the
+  very first call - see `test_stop_halts_immediately_with_unwritable_state_dir`.
 
 **Defense in depth added beyond the two real bugs**, since a security gate should fail
 closed on *any* surprise, not just the ones found today: `_cmd_hook_pre_bash` and

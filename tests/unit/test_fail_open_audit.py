@@ -15,9 +15,13 @@ Scope summary, checked against each hook's actual implementation:
 - malformed/empty stdin: tested for all three
 - verifier exceeds timeout: N/A for pre-bash/compact (no verifier); tested for
   stop
-- unwritable state dir: N/A for pre-bash/compact (neither touches state.py);
-  tested for stop, which must degrade (no caching/counter) but still correctly
-  evaluate and report
+- unwritable state dir: N/A for pre-bash/compact (neither touches state.py). For
+  stop: caching alone degrades silently (fast.run_fast_tier still correctly
+  evaluates and reports), but the no-progress counter specifically must halt
+  immediately rather than block - if it can never persist, it can never reach
+  its threshold either, so a block-forever loop would follow otherwise (Claude
+  Code's 8-consecutive-block cap doesn't save us: it resets on every tool call,
+  and the agent keeps calling tools while trying to fix the failure)
 - unexpected crash: tested for all three
 """
 
@@ -158,30 +162,46 @@ def test_stop_halts_on_verifier_timeout(tmp_path: Path, monkeypatch: pytest.Monk
     assert "systemMessage" in body
 
 
-def test_stop_degrades_gracefully_with_unwritable_state_dir(
+def test_stop_halts_immediately_with_unwritable_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A file sitting where `.actually-done/` (a directory) needs to go makes every
-    state write fail - the verifier must still correctly evaluate and report, just
-    without caching or the no-progress counter persisting.
+    state write fail. fast.run_fast_tier still correctly evaluates the failure (its
+    own caching degrades silently), but the no-progress counter can never persist,
+    so it could never reach its 3-strikes threshold - blocking would never resolve
+    on its own. This must halt on the very first call, not block.
     """
     _init_base_repo(tmp_path)
-    # A real, failing change - the real question is whether it's still reported.
     (tmp_path / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
     (tmp_path / ".actually-done").write_text("blocking file, not a directory", encoding="utf-8")
 
     monkeypatch.chdir(tmp_path)
     body = _run_hook_stop_raw(monkeypatch, "{}")
 
-    assert body.get("decision") == "block"
-    assert "test_add" in body["reason"]  # type: ignore[union-attr]
+    assert "decision" not in body
+    assert "systemMessage" in body
+    message = body["systemMessage"]  # type: ignore[index]
+    assert "state dir not writable" in message
+    assert str(tmp_path / ".actually-done") in message
 
 
-def test_state_save_does_not_raise_when_state_dir_is_unwritable(tmp_path: Path) -> None:
+def test_state_cache_and_reset_do_not_raise_when_state_dir_is_unwritable(
+    tmp_path: Path,
+) -> None:
+    """Caching and the pass-path reset are optimizations, not correctness
+    requirements, so they degrade silently - only record_attempt must surface the
+    failure (see test_stop_halts_immediately_with_unwritable_state_dir).
+    """
     (tmp_path / ".actually-done").write_text("blocking file", encoding="utf-8")
     state.set_cached_result(tmp_path, "abc", {"status": "pass"})  # must not raise
-    state.record_attempt(tmp_path, ["tests/test_x.py::test_y"])  # must not raise
     state.reset_attempts(tmp_path)  # must not raise
+
+
+def test_record_attempt_raises_state_unwritable(tmp_path: Path) -> None:
+    (tmp_path / ".actually-done").write_text("blocking file", encoding="utf-8")
+    with pytest.raises(state.StateUnwritable) as excinfo:
+        state.record_attempt(tmp_path, ["tests/test_x.py::test_y"])
+    assert "state dir not writable" in str(excinfo.value)
 
 
 def test_fast_tier_does_not_depend_on_python_being_on_path(
