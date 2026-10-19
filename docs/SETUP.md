@@ -57,7 +57,24 @@ This catches the plain `git push ...` spelling one step earlier (before the hook
 runs), but **does not** catch `git -C . push`, `sh -c "git push"`, or similar - only the
 hook does. Don't rely on this rule alone.
 
-## 5. Adoption order
+## 5. Windows
+
+The three local hooks are bash scripts, so they need Git for Windows (which provides Git
+Bash) to run at all - without it, Claude Code uses the PowerShell tool instead of Bash,
+and none of the hooks fire. **Even with Git for Windows installed**, the PowerShell tool
+is also enabled by default, so a `git push` issued through it instead of Bash still
+bypasses the push guard specifically. If you need the push guard's local protection on
+Windows:
+
+1. Install [Git for Windows](https://git-scm.com/downloads/win).
+2. Set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` in your `settings.json`'s `env` to disable the
+   PowerShell tool.
+
+The full-tier CI check is unaffected either way - it runs on a Linux GitHub Actions
+runner regardless of your local OS or tool choice, and remains the actual backstop. See
+`docs/DECISIONS.md`, D9, for the full reasoning.
+
+## 6. Adoption order
 
 Follow `solution.md`'s "Setup principles" section for the fuller picture. The short
 version, in order of effort:
@@ -73,7 +90,7 @@ version, in order of effort:
 - **Later**: mutation/property/held-out tests, the change map, and clone/complexity
   gates - see `ROADMAP.md` for what's not built yet and why.
 
-## 6. Verify it's working
+## 7. Verify it's working
 
 ```bash
 # Push guard: run this through the Bash tool in a Claude Code session and confirm it's blocked.

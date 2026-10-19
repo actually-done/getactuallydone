@@ -85,6 +85,14 @@ to re-run.
   `[tool.pytest.ini_options]`** (it clears `addopts` but doesn't lock `markers`/
   `filterwarnings` to base). See `ROADMAP.md` for the full list of known trade-offs and
   what's deliberately out of scope.
+- **On Windows, local hook coverage depends on which tool runs the command, not the OS.**
+  Without Git for Windows, Claude Code uses the PowerShell tool instead of Bash, and none
+  of the three hooks (all shell scripts) can even start. With Git for Windows installed,
+  the PowerShell tool is *also* enabled by default, so a `git push` run through it instead
+  of Bash still bypasses the push guard. Set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` if you
+  need the push guard's local protection on Windows; the full-tier CI check is unaffected
+  either way, since it runs on a Linux GitHub Actions runner regardless. See
+  `docs/DECISIONS.md`, D9.
 
 ## The attack suite
 

@@ -51,3 +51,9 @@ Not out of scope exactly, but simplified in ways worth knowing about:
 - **Python/pytest only.** `changes.py`/`full.py`'s source-vs-test classification and the
   whole sandbox-building approach assume pytest. solution.md also names
   `jest --findRelatedTests`/`vitest related` for JS/TS - a real port, not a config knob.
+- **A PowerShell-matched push guard.** On Windows, the PowerShell tool runs alongside
+  Bash by default even with Git for Windows installed, and our PreToolUse guard is
+  matched to `"Bash"` only - a push issued through PowerShell isn't caught locally (the
+  full-tier CI check still catches it; see `docs/DECISIONS.md`, D9). A second PreToolUse
+  entry matched to `"PowerShell"`, parsing PowerShell's `git`-invocation syntax the way
+  `guard.py` parses POSIX shell syntax, would close this.
