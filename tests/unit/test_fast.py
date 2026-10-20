@@ -63,6 +63,25 @@ def test_runs_and_fails_on_broken_source(repo: Path) -> None:
     assert any("test_add" in t for t in result.failing_tests)
 
 
+def test_not_broken_by_an_inherited_plugin_autoload_lockdown(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that already set PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 (actually-done's
+    own full-tier check does this on the sandboxed pytest run it spawns, to deny a
+    PR's own conftest.py/plugins a say in its result - see full.py's _pytest_env)
+    must not break this subprocess's own --testmon flag by inheriting it: autoload
+    is how testmon's plugin actually gets registered, so inheriting a disabled
+    autoload makes pytest reject --testmon outright (exit 4, a usage error) -
+    surfacing as status "error" here instead of a real pass/fail. Caught for real
+    on this project's own CI, which runs this test from inside exactly that
+    sandboxed, autoload-disabled environment.
+    """
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a + b  # ok\n", encoding="utf-8")
+    result = fast.run_fast_tier(repo, _config())
+    assert result.status == "pass", result.details
+
+
 def test_result_is_cached_by_working_tree_hash(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
