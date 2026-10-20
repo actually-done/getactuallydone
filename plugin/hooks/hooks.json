@@ -3,11 +3,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-bash.sh\"",
+            "command": "actually-done",
+            "args": ["hook", "pre-bash"],
             "onFailure": "block"
           }
         ]

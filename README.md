@@ -40,9 +40,12 @@ to re-run.
 
 ## What it does
 
-- **Push guard** (`PreToolUse` hook): blocks `git push` in a `Bash` command however it's
-  spelled - `git -C . push`, `env X=1 git push`, a push buried inside `sh -c "..."` - by
-  tokenizing the command like a shell would, not pattern-matching the literal text.
+- **Push guard** (`PreToolUse` hook, matched to `Bash|PowerShell`): blocks `git push`
+  however it's spelled, in either tool - `git -C . push`, `env X=1 git push`, a push
+  buried inside `sh -c "..."` on the Bash side; `& git push`, `cmd /c git push`,
+  `Start-Process git -ArgumentList "push"` on the PowerShell side - by tokenizing the
+  command the way the shell that's actually running it would, not pattern-matching the
+  literal text or covering only one tool.
 - **Fast tier** (`Stop` hook): when a source file changed, runs the affected tests
   (`pytest-testmon` if installed, else the configured unit suite) under a timeout, and
   blocks the agent from finishing if they fail - unless the same failure has already
@@ -85,14 +88,15 @@ to re-run.
   `[tool.pytest.ini_options]`** (it clears `addopts` but doesn't lock `markers`/
   `filterwarnings` to base). See `ROADMAP.md` for the full list of known trade-offs and
   what's deliberately out of scope.
-- **On Windows, local hook coverage depends on which tool runs the command, not the OS.**
-  Without Git for Windows, Claude Code uses the PowerShell tool instead of Bash, and none
-  of the three hooks (all shell scripts) can even start. With Git for Windows installed,
-  the PowerShell tool is *also* enabled by default, so a `git push` run through it instead
-  of Bash still bypasses the push guard. Set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` if you
-  need the push guard's local protection on Windows; the full-tier CI check is unaffected
-  either way, since it runs on a Linux GitHub Actions runner regardless. See
-  `docs/DECISIONS.md`, D9.
+- **On Windows, the push guard covers both the Bash and PowerShell tools, but the Stop
+  and compact hooks still need Git for Windows.** The push guard is matched to
+  `Bash|PowerShell` and invokes `actually-done` directly (no shell wrapper), so it works
+  whichever tool Claude Code is actually using. The Stop and compact hooks are still
+  bash scripts, so without Git for Windows installed they can't start at all - on that
+  configuration, you get the push guard but not the fast-tier Stop hook locally. The
+  full-tier CI check is unaffected either way, since it runs on a Linux GitHub Actions
+  runner regardless of the developer's local OS or tool choice. See `docs/DECISIONS.md`,
+  D9 and D11.
 
 ## The attack suite
 
@@ -107,7 +111,7 @@ infrastructure to make these true.
 | Agent deletes the test that catches its bug | Full tier (test-count drop, unapproved) | [`test_attack_03_deleted_test.py`](tests/attacks/test_attack_03_deleted_test.py) |
 | Agent adds a `conftest.py` hook that marks every result as passed | Full tier (base config locked, plugin autoload disabled) | [`test_attack_04_cheat_conftest.py`](tests/attacks/test_attack_04_cheat_conftest.py) |
 | Agent special-cases one oracle test's exact input instead of generalizing | A second oracle test covering the same boundary class, run for real via `--runxfail` | [`test_attack_05_special_cased_production_code.py`](tests/attacks/test_attack_05_special_cased_production_code.py) |
-| Agent pushes via `git -C . push` or `sh -c "git push"` | Push guard (PreToolUse hook) | [`test_attack_06_push_guard_bypass_attempts.py`](tests/attacks/test_attack_06_push_guard_bypass_attempts.py) |
+| Agent pushes via `git -C . push`, `sh -c "git push"`, or the PowerShell tool (`Start-Process git -ArgumentList "push"`, `cmd /c git push`) | Push guard (PreToolUse hook, matched to `Bash\|PowerShell`) | [`test_attack_06_push_guard_bypass_attempts.py`](tests/attacks/test_attack_06_push_guard_bypass_attempts.py) |
 | The verifier itself crashes | Stop-hook wrapper halts (never a silent pass) | [`test_attack_07_verifier_crash.py`](tests/attacks/test_attack_07_verifier_crash.py) |
 
 ## Development

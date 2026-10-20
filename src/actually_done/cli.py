@@ -15,22 +15,27 @@ _MAX_COMPACT_LINES = 20
 
 def _cmd_hook_pre_bash(_args: argparse.Namespace) -> int:
     """Fails closed (blocks) on anything it can't make sense of, not just a detected
-    push: this hook's matcher already scopes it to Bash tool calls, so a payload with
-    no parseable `tool_input.command` - or any other unexpected failure - means
-    something is wrong, not that the command is safe. See docs/DECISIONS.md, D9/the
-    fail-open audit.
+    push: this hook's matcher scopes it to Bash and PowerShell tool calls only (see
+    hooks.json), so a payload with no parseable `tool_input.command` - or any other
+    unexpected failure - means something is wrong, not that the command is safe. See
+    docs/DECISIONS.md, D9/D11/the fail-open audit.
+
+    `tool_name` picks the dialect: PowerShell's command syntax (the call operator,
+    `cmd /c`, `Start-Process`) differs enough from POSIX shell that they need separate
+    parsers - see guard.check_push_for_tool.
     """
     try:
         payload = hookio.read_payload(sys.stdin)
-        command = guard.extract_bash_command(payload)
+        command = guard.extract_command(payload)
         if command is None:
             print(
-                "actually-done: could not read the Bash command from the hook payload. "
+                "actually-done: could not read the command from the hook payload. "
                 "Blocking out of caution.",
                 file=sys.stderr,
             )
             return 2
-        blocked, reason = guard.check_push(command)
+        tool_name = payload.get("tool_name")
+        blocked, reason = guard.check_push_for_tool(tool_name, command)
         if blocked:
             print(reason, file=sys.stderr)
             return 2

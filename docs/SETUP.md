@@ -59,20 +59,18 @@ hook does. Don't rely on this rule alone.
 
 ## 5. Windows
 
-The three local hooks are bash scripts, so they need Git for Windows (which provides Git
-Bash) to run at all - without it, Claude Code uses the PowerShell tool instead of Bash,
-and none of the hooks fire. **Even with Git for Windows installed**, the PowerShell tool
-is also enabled by default, so a `git push` issued through it instead of Bash still
-bypasses the push guard specifically. If you need the push guard's local protection on
-Windows:
+The push guard works with either the Bash tool or the PowerShell tool - it's matched to
+`Bash|PowerShell` and invokes `actually-done` directly, with no shell wrapper of its
+own. The Stop and compact hooks are still bash scripts, though, so they need Git for
+Windows (which provides Git Bash) to run at all: without it, Claude Code uses the
+PowerShell tool instead of Bash, and those two hooks don't fire - you still get the push
+guard, just not the local fast-tier Stop hook.
 
-1. Install [Git for Windows](https://git-scm.com/downloads/win).
-2. Set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` in your `settings.json`'s `env` to disable the
-   PowerShell tool.
-
-The full-tier CI check is unaffected either way - it runs on a Linux GitHub Actions
-runner regardless of your local OS or tool choice, and remains the actual backstop. See
-`docs/DECISIONS.md`, D9, for the full reasoning.
+To get all three hooks working locally on Windows, install
+[Git for Windows](https://git-scm.com/downloads/win). It's optional either way: the
+full-tier CI check is unaffected regardless, since it runs on a Linux GitHub Actions
+runner no matter your local OS or tool choice, and remains the actual backstop. See
+`docs/DECISIONS.md`, D9 and D11, for the full reasoning.
 
 ## 6. Adoption order
 

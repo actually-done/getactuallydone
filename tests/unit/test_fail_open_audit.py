@@ -33,7 +33,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -295,51 +294,8 @@ def test_compact_noop_on_unexpected_crash(
     monkeypatch.setattr(Path, "read_text", _boom)
     assert _run_hook_compact_raw(monkeypatch, json.dumps({"source": "compact"})) == {}
 
-
-# ---------------------------------------------------------------------------
-# wrapper scripts: never relay a surprise exit code as a silent allow
-# ---------------------------------------------------------------------------
-
-
-def _find_working_bash() -> str | None:
-    candidates = []
-    if platform.system() == "Windows":
-        candidates += [
-            r"C:\Program Files\Git\usr\bin\bash.exe",
-            r"C:\Program Files\Git\bin\bash.exe",
-        ]
-    found = shutil.which("bash")
-    if found:
-        candidates.append(found)
-    for candidate in candidates:
-        try:
-            subprocess.run([candidate, "--version"], capture_output=True, timeout=10, check=True)
-            return candidate
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            continue
-    return None
-
-
-_BASH = _find_working_bash()
-
-
-@pytest.mark.skipif(_BASH is None, reason="requires a working bash")
-def test_pre_bash_sh_blocks_when_actually_done_exits_unexpectedly(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    stub = fake_bin / "actually-done"
-    stub.write_text("#!/usr/bin/env bash\necho 'boom' >&2\nexit 1\n", encoding="utf-8")
-    stub.chmod(0o755)
-
-    script = Path(__file__).resolve().parents[2] / "plugin" / "scripts" / "pre-bash.sh"
-    env = dict(os.environ)
-    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
-    completed = subprocess.run(
-        [_BASH, str(script)],
-        input=json.dumps({"tool_input": {"command": "git status"}}),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-    )
-    assert completed.returncode == 2  # never relays the stub's exit 1 as "allow"
+# Note: pre-bash no longer has its own shell wrapper (see docs/DECISIONS.md, D11) -
+# hooks.json invokes `actually-done` directly with onFailure: "block", which is
+# Claude Code's own mechanism for "the command can't start or exits oddly", not
+# something this codebase implements or can unit test. _cmd_hook_pre_bash's own
+# try/except (tested above) is what's left to verify on this side.

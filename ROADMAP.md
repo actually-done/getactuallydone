@@ -51,9 +51,16 @@ Not out of scope exactly, but simplified in ways worth knowing about:
 - **Python/pytest only.** `changes.py`/`full.py`'s source-vs-test classification and the
   whole sandbox-building approach assume pytest. solution.md also names
   `jest --findRelatedTests`/`vitest related` for JS/TS - a real port, not a config knob.
-- **A PowerShell-matched push guard.** On Windows, the PowerShell tool runs alongside
-  Bash by default even with Git for Windows installed, and our PreToolUse guard is
-  matched to `"Bash"` only - a push issued through PowerShell isn't caught locally (the
-  full-tier CI check still catches it; see `docs/DECISIONS.md`, D9). A second PreToolUse
-  entry matched to `"PowerShell"`, parsing PowerShell's `git`-invocation syntax the way
-  `guard.py` parses POSIX shell syntax, would close this.
+- **A bash-independent Stop/compact hook.** The push guard no longer needs `bash` to run
+  at all (D11), but the Stop and compact hooks still do - on native Windows without Git
+  for Windows, you get the push guard but not the fast-tier Stop hook locally. The
+  full-tier CI check is unaffected regardless (it runs on Linux). Closing this would need
+  the same "invoke the CLI directly, don't wrap it in a shell" treatment D11 gave the
+  push guard, but Stop can't lean on `onFailure` (D2), so it would need its own
+  fail-closed story.
+- **Precise `Start-Process`/`cmd.exe` parsing for the PowerShell push guard.** D11's
+  `Start-Process` match is a co-occurrence heuristic (`git`/`git.exe` and an exact `push`
+  word among the remaining tokens), not true named-parameter parsing, and `cmd /c`
+  recursion re-tokenizes the embedded string with the PowerShell tokenizer rather than a
+  real cmd.exe parser. Both are honest, documented gaps (`docs/DECISIONS.md`, D11), not
+  silent ones.

@@ -12,9 +12,14 @@ import pytest
 from actually_done import cli
 
 
-def _run_pre_bash(monkeypatch: pytest.MonkeyPatch, command: str) -> tuple[int, str]:
-    payload = json.dumps({"tool_input": {"command": command}})
-    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+def _run_pre_bash(
+    monkeypatch: pytest.MonkeyPatch, command: str, tool_name: str | None = None
+) -> tuple[int, str]:
+    tool_input: dict[str, object] = {"command": command}
+    payload: dict[str, object] = {"tool_input": tool_input}
+    if tool_name is not None:
+        payload["tool_name"] = tool_name
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     captured: list[str] = []
     monkeypatch.setattr(
         "builtins.print",
@@ -32,6 +37,20 @@ def test_pre_bash_blocks_push(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_pre_bash_allows_status(monkeypatch: pytest.MonkeyPatch) -> None:
     exit_code, stderr = _run_pre_bash(monkeypatch, "git status")
+    assert exit_code == 0
+    assert stderr == ""
+
+
+def test_pre_bash_blocks_push_via_powershell_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, stderr = _run_pre_bash(
+        monkeypatch, 'Start-Process git -ArgumentList "push","origin"', tool_name="PowerShell"
+    )
+    assert exit_code == 2
+    assert "push" in stderr.lower()
+
+
+def test_pre_bash_allows_powershell_non_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, stderr = _run_pre_bash(monkeypatch, "Get-ChildItem", tool_name="PowerShell")
     assert exit_code == 0
     assert stderr == ""
 
