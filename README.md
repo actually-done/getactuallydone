@@ -42,7 +42,7 @@ claude --plugin-dir ./plugin
 Or add this repo as a marketplace and install from it:
 
 ```bash
-claude plugin marketplace add <this-repo>
+claude plugin marketplace add actually-done/actually-done
 claude plugin install actually-done
 ```
 

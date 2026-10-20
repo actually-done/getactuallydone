@@ -73,13 +73,15 @@ def _run(sandbox: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_dry_run_prints_valid_ruleset_json(sandbox: Path) -> None:
-    result = _run(sandbox, "actually-done/getactuallydone", "test-user", "--dry-run")
+    result = _run(sandbox, "actually-done/actually-done", "test-user", "--dry-run")
     assert result.returncode == 0, result.stderr
 
     payload = json.loads(result.stdout)
     assert payload["target"] == "branch"
     assert payload["enforcement"] == "active"
-    assert payload["bypass_actors"] == []
+    assert payload["bypass_actors"] == [
+        {"actor_type": "User", "actor_id": 0, "bypass_mode": "pull_request"}
+    ]
     assert payload["conditions"] == {
         "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
     }
@@ -129,6 +131,95 @@ def test_dry_run_never_invokes_gh_at_all(sandbox: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Creating ruleset" not in result.stderr
     json.loads(result.stdout)  # still valid JSON
+
+
+def test_dry_run_bypass_actor_placeholder_is_explained(sandbox: Path) -> None:
+    """--dry-run can't resolve a real user id without calling `gh` (which it must
+    never do), so it shows a placeholder and must say so, not leave it looking
+    like a real id.
+    """
+    result = _run(sandbox, "owner/repo", "test-user", "--dry-run")
+    assert "Bypass actor: @test-user" in result.stderr
+    assert "never calls" in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["bypass_actors"] == [
+        {"actor_type": "User", "actor_id": 0, "bypass_mode": "pull_request"}
+    ]
+
+
+def _make_stub(bin_dir: Path, name: str, body: str) -> None:
+    stub = bin_dir / name
+    stub.write_text(f"#!/usr/bin/env bash\n{body}\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+
+def test_real_run_resolves_bypass_actor_id_via_gh(sandbox: Path) -> None:
+    """A real (non-dry-run) call must look up GITHUB_USERNAME's numeric id via
+    `gh api users/<username>` and put that real id - not a placeholder - into
+    the bypass_actors entry it sends and prints back.
+    """
+    import os
+
+    fake_bin = sandbox / "fakebin"
+    fake_bin.mkdir()
+    _make_stub(
+        fake_bin,
+        "gh",
+        """
+case "$*" in
+  *"users/test-user"*)
+    echo 424242
+    ;;
+  *"--method POST"*)
+    cat >/dev/null
+    echo 999
+    ;;
+  *"rulesets/999"*)
+    echo '{"id": 999, "bypass_actors":'
+    echo '  [{"actor_type": "User", "actor_id": 424242, "bypass_mode": "pull_request"}]}'
+    ;;
+  *)
+    echo "unexpected gh invocation: $*" >&2
+    exit 1
+    ;;
+esac
+""",
+    )
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(fake_bin), env.get("PATH", "")])
+    script = str(sandbox / "scripts" / "setup_github.sh")
+    result = subprocess.run(
+        [_BASH, script, "owner/repo", "test-user"],
+        cwd=sandbox,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "424242" in result.stdout
+    assert "Resolving GitHub user id for @test-user" in result.stderr
+
+
+def test_real_run_errors_when_user_lookup_fails(sandbox: Path) -> None:
+    import os
+
+    fake_bin = sandbox / "fakebin"
+    fake_bin.mkdir()
+    _make_stub(fake_bin, "gh", 'echo "not found" >&2\nexit 1')
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(fake_bin), env.get("PATH", "")])
+    script = str(sandbox / "scripts" / "setup_github.sh")
+    result = subprocess.run(
+        [_BASH, script, "owner/repo", "test-user"],
+        cwd=sandbox,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert "Could not resolve a GitHub user id" in result.stderr
 
 
 def test_status_check_name_derived_from_real_workflow_job(sandbox: Path) -> None:

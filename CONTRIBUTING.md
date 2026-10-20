@@ -44,8 +44,8 @@ stored in this repo.
 One-time setup this workflow depends on, done on PyPI's side, not here:
 
 1. On PyPI, add a trusted publisher for this project: GitHub owner/repo
-   `actually-done/actually-done` (or wherever this ends up), workflow filename
-   `release.yml`, environment name `pypi`.
+   `actually-done/actually-done`, workflow filename `release.yml`, environment name
+   `pypi`.
 2. Optionally, under this repo's Settings → Environments, create a `pypi` environment
    and add required reviewers for a manual approval gate before every publish. The
    workflow references this environment either way; it's a no-op if left unconfigured.

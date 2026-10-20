@@ -3,7 +3,9 @@
 #   1. Create a ruleset on the default branch requiring a PR, 1 approval with
 #      stale-review dismissal and most-recent-push approval, Code Owner review,
 #      the actually-done full-tier check (strict/up to date), and blocking force
-#      pushes and deletions - with an empty bypass list.
+#      pushes and deletions - with GITHUB_USERNAME as the sole bypass actor, in
+#      pull-requests-only mode (solution.md's "Week 1" guidance: the human
+#      maintainer, not the agent, can still merge without a second reviewer).
 #   2. Replace CODEOWNERS' @YOUR-GITHUB-USERNAME placeholder with a real username,
 #      as a normal file edit for you to review and commit yourself.
 #   3. Print the created ruleset back via `gh api` so you can eyeball it.
@@ -143,12 +145,38 @@ fi
   echo
 } >&2
 
+# The bypass actor is GITHUB_USERNAME, by resolved numeric GitHub user id, in
+# "pull_request" mode - they can still merge their own PR without a second
+# approval, but can't push straight past the ruleset outside a PR. GitHub's
+# rulesets API requires actor_id for actor_type "User" (an *Integration*
+# actor_id, by contrast, is the GitHub App's own id - irrelevant here since
+# this bypasses a human, not the agent). Resolving the real id needs a `gh api`
+# call, which --dry-run must never make (see test_dry_run_never_invokes_gh_at_all),
+# so dry-run substitutes a placeholder and explains it below instead.
+if [ "$DRY_RUN" -eq 1 ]; then
+  BYPASS_ACTOR_ID=0
+  {
+    echo "Bypass actor: @$GITHUB_USERNAME (actor_id shown as 0 - --dry-run never calls"
+    echo " \`gh\`, so the real numeric id isn't resolved; a real run looks it up via"
+    echo " \`gh api users/$GITHUB_USERNAME --jq .id\`)."
+    echo
+  } >&2
+else
+  echo "Resolving GitHub user id for @$GITHUB_USERNAME..." >&2
+  if ! BYPASS_ACTOR_ID=$(gh api "users/$GITHUB_USERNAME" --jq '.id'); then
+    echo "Could not resolve a GitHub user id for '$GITHUB_USERNAME' - check the username and your \`gh auth status\`." >&2
+    exit 1
+  fi
+fi
+
 RULESET_PAYLOAD=$(cat <<JSON
 {
   "name": "actually-done: require PR, full-tier CI, and Code Owner review",
   "target": "branch",
   "enforcement": "active",
-  "bypass_actors": [],
+  "bypass_actors": [
+    { "actor_type": "User", "actor_id": $BYPASS_ACTOR_ID, "bypass_mode": "pull_request" }
+  ],
   "conditions": {
     "ref_name": {
       "include": ["~DEFAULT_BRANCH"],

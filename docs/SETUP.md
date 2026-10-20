@@ -33,7 +33,7 @@ claude --plugin-dir ./plugin
 To install it properly, add this repo as a marketplace and install from it:
 
 ```bash
-claude plugin marketplace add <this-repo>
+claude plugin marketplace add actually-done/actually-done
 claude plugin install actually-done
 ```
 
@@ -61,8 +61,14 @@ this, Code Owner review isn't actually enforced on the paths that matter. Or let
 with admin rights on the repo) creates a ruleset on the default branch requiring a PR, 1
 approval with stale-review dismissal and most-recent-push approval, Code Owner review,
 the `actually-done` full-tier check (strict/up to date), and blocking force pushes and
-deletions - with an empty bypass list. It also replaces CODEOWNERS' placeholder with
-your username, as a normal file edit left for you to review and commit.
+deletions - with YOUR_GITHUB_USERNAME as the sole bypass actor, in pull-requests-only
+mode (`bypass_mode: "pull_request"`), so you can still merge your own PR without a
+second reviewer but can't push straight past the ruleset outside a PR. A real (non
+`--dry-run`) run resolves your username to its numeric GitHub user id via
+`gh api users/YOUR_GITHUB_USERNAME`; the agent's own identity is never covered by this
+bypass entry, since it has a separate GitHub account per `solution.md`'s "Agent
+identity" section. It also replaces CODEOWNERS' placeholder with your username, as a
+normal file edit left for you to review and commit.
 
 ```bash
 # Preview the ruleset JSON without calling the API:
