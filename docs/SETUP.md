@@ -52,9 +52,41 @@ paths, `tests/oracle/.gitkeep`, an `AGENTS.md` critical-rules block (imported in
 pass `--force`.
 
 Open `CODEOWNERS` and replace `@YOUR-GITHUB-USERNAME` with yourself or a team - without
-this, Code Owner review isn't actually enforced on the paths that matter.
+this, Code Owner review isn't actually enforced on the paths that matter. Or let
+`scripts/setup_github.sh` do it for you, along with the GitHub ruleset below.
 
-## 4. Optional: a manual permission deny rule
+## 4. GitHub ruleset
+
+`scripts/setup_github.sh OWNER/REPO YOUR_GITHUB_USERNAME` (requires `gh`, authenticated
+with admin rights on the repo) creates a ruleset on the default branch requiring a PR, 1
+approval with stale-review dismissal and most-recent-push approval, Code Owner review,
+the `actually-done` full-tier check (strict/up to date), and blocking force pushes and
+deletions - with an empty bypass list. It also replaces CODEOWNERS' placeholder with
+your username, as a normal file edit left for you to review and commit.
+
+```bash
+# Preview the ruleset JSON without calling the API:
+scripts/setup_github.sh OWNER/REPO YOUR_GITHUB_USERNAME --dry-run
+
+# Create it for real, and replace CODEOWNERS' placeholder:
+scripts/setup_github.sh OWNER/REPO YOUR_GITHUB_USERNAME
+```
+
+The required status check's name is derived from the `actually-done.yml` workflow's
+`verify` job's own `name:` field ("actually-done full tier"), on the assumption
+(supported by GitHub's own "job names must be unique across all workflows" warning, but
+not yet confirmed against a real check run by this project) that GitHub matches required
+status checks against a job's display name, not its id or the workflow's name. After
+your first PR runs, confirm with:
+
+```bash
+gh api "repos/OWNER/REPO/commits/<sha>/check-runs" --jq '.check_runs[].name'
+```
+
+and rerun with `--status-check "<actual name>"` if it doesn't match - the script prints
+this same reminder every time it runs.
+
+## 5. Optional: a manual permission deny rule
 
 Plugins can't ship permission rules (`settings.json`'s `permissions` key has no effect
 from a plugin - see `docs/DECISIONS.md`, D1), so the push guard's PreToolUse hook is the
@@ -73,7 +105,7 @@ This catches the plain `git push ...` spelling one step earlier (before the hook
 runs), but **does not** catch `git -C . push`, `sh -c "git push"`, or similar - only the
 hook does. Don't rely on this rule alone.
 
-## 5. Windows
+## 6. Windows
 
 The push guard works with either the Bash tool or the PowerShell tool - it's matched to
 `Bash|PowerShell` and invokes `actually-done` directly, with no shell wrapper of its
@@ -88,14 +120,14 @@ full-tier CI check is unaffected regardless, since it runs on a Linux GitHub Act
 runner no matter your local OS or tool choice, and remains the actual backstop. See
 `docs/DECISIONS.md`, D9 and D11, for the full reasoning.
 
-## 6. Adoption order
+## 7. Adoption order
 
 Follow `solution.md`'s "Setup principles" section for the fuller picture. The short
 version, in order of effort:
 
 - **Day 1**: `actually-done init`, and make the full-tier check required in your
-  branch's protection rules/ruleset. This is the actual gate - everything else is best
-  effort until this is on.
+  branch's protection rules/ruleset (`scripts/setup_github.sh`, step 4 above, does
+  this). This is the actual gate - everything else is best effort until this is on.
 - **Week 1**: give the agent its own bot identity (no Administration/Workflows access),
   turn on Code Owner review for the `CODEOWNERS` paths, require 1 approval with your own
   account as the only bypass actor, and narrow the push deny rule to protected branches.
@@ -104,7 +136,7 @@ version, in order of effort:
 - **Later**: mutation/property/held-out tests, the change map, and clone/complexity
   gates - see `ROADMAP.md` for what's not built yet and why.
 
-## 7. Verify it's working
+## 8. Verify it's working
 
 ```bash
 # Push guard: run this through the Bash tool in a Claude Code session and confirm it's blocked.
