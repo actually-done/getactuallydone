@@ -102,3 +102,42 @@ def test_result_is_cached_by_working_tree_hash(
     assert second.status == "fail"
     assert second.failing_tests == first.failing_tests
     assert all("pytest" not in cmd for cmd in calls)  # cache hit: pytest never ran again
+
+
+def test_cache_hit_diagnostics_for_a_flaky_linux_ci_failure(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Temporary: test_result_is_cached_by_working_tree_hash fails only on real
+    Linux CI, never locally on Windows, and only AFTER fast.py's env/testmon-WAL
+    fixes let it reach this assertion at all (D15). This duplicates that test's
+    scenario but reports exactly what the real untracked-file state looked like
+    on failure, since the plain `assert False` from the original gives no detail
+    to go on. Delete once D15's remaining caching flake is actually diagnosed.
+    """
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    first = fast.run_fast_tier(repo, _config())
+    assert first.status == "fail"
+
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def spy(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    second = fast.run_fast_tier(repo, _config())
+    assert second.status == "fail"
+
+    if any("pytest" in cmd for cmd in calls):
+        status_raw = subprocess.run(
+            ["git", "status", "--porcelain=v1"], cwd=repo, capture_output=True, text=True
+        ).stdout
+        all_entries = sorted(
+            str(p.relative_to(repo)) for p in repo.rglob("*") if ".git" not in p.parts
+        )
+        pytest.fail(
+            "cache missed on the second call - raw `git status --porcelain=v1`:\n"
+            f"{status_raw!r}\nall non-.git entries on disk:\n{all_entries!r}\n"
+            f"subprocess calls made during the second run:\n{calls!r}"
+        )
