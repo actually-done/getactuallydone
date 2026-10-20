@@ -106,22 +106,19 @@ def test_dry_run_prints_valid_ruleset_json(sandbox: Path) -> None:
 
 
 def test_dry_run_never_invokes_gh_at_all(sandbox: Path) -> None:
-    """--dry-run must succeed even when `gh` would fail if called - proving it
+    """--dry-run must succeed even when `gh` isn't on PATH at all - proving it
     never shells out to the API, not just that it happens to print the right
-    thing when gh *is* available. A stub `gh` that errors loudly, placed first
-    on PATH, proves this the same way dropping `gh` from PATH entirely would -
-    without removing whole PATH directories, which on a stock Linux runner can
-    hold `gh` bundled alongside `dirname`/`git`/coreutils in the same directory
-    (e.g. /usr/bin), so stripping any directory containing `gh` there breaks
-    far more than just `gh` itself.
+    thing when gh *is* available.
     """
     import os
 
-    fake_bin = sandbox / "fakebin"
-    fake_bin.mkdir()
-    _make_stub(fake_bin, "gh", 'echo "gh should never be invoked by --dry-run" >&2\nexit 1')
     env = dict(os.environ)
-    env["PATH"] = os.pathsep.join([str(fake_bin), env.get("PATH", "")])
+    kept = [
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if entry and not (Path(entry) / "gh").exists() and not (Path(entry) / "gh.exe").exists()
+    ]
+    env["PATH"] = os.pathsep.join(kept)
     script = str(sandbox / "scripts" / "setup_github.sh")
     result = subprocess.run(
         [_BASH, script, "owner/repo", "test-user", "--dry-run"],
@@ -133,7 +130,6 @@ def test_dry_run_never_invokes_gh_at_all(sandbox: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "Creating ruleset" not in result.stderr
-    assert "should never be invoked" not in result.stderr
     json.loads(result.stdout)  # still valid JSON
 
 
