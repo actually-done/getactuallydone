@@ -156,11 +156,41 @@ point is to detect "`actually-done` isn't on `PATH`" - if the check itself were
 `actually-done hook session-check`, it would have the identical bootstrap problem
 it exists to report (the hook command couldn't start either). `plugin/scripts/
 session-start-check.sh` is dependency-free: `command -v` for both presence checks,
-and `claude --version` (wrapped in `timeout 5` when available, so a hang there can't
-delay every session start) parsed with `grep -oE` and compared numerically
+and `claude --version` output parsed with `grep -oE` and compared numerically
 component-by-component against `2.1.295` - plain string comparison would wrongly
 order e.g. `2.1.9` above `2.1.10`. This is consistent with the Stop/compact hooks'
 existing bash dependency (D9), not a new category of gap.
+
+**Correction - `timeout` isn't portable enough to trust by name alone**: the first
+version wrapped `claude --version` in `timeout 5` whenever `command -v timeout`
+succeeded. Two real problems with that, caught on review before release:
+
+- Stock macOS has no `timeout` command at all - only `gtimeout`, from
+  `brew install coreutils`. The original code would just run `claude --version`
+  unbounded there, silently losing the time limit.
+- On Windows, Git Bash's `PATH` typically carries *two* programs named `timeout`:
+  Git's own GNU coreutils one (`.../Git/usr/bin/timeout.exe`) and Windows' native
+  `C:\Windows\System32\timeout.exe` - a completely different tool that waits N
+  seconds or for a keypress and does not run-and-kill a command at all. Which one
+  `command -v timeout` finds depends on `PATH` order, which varies by machine -
+  confirmed on this project's own dev machine: `where timeout` lists both, with
+  Git's version first in that particular `PATH`, but nothing guarantees that order
+  for every user. Running `timeout 5 claude --version` against the native one would
+  not behave as a 5-second limiter at all.
+
+Fixed by detecting a real limiter *behaviorally*, not by name: try `timeout` then
+`gtimeout`, and accept a candidate only if `<candidate> --version </dev/null` prints
+"GNU coreutils" - confirmed safe to probe this way, since the native Windows
+`timeout.exe` rejects `--version` immediately (`ERROR: Invalid value for timeout (/T)
+specified`, exit 1) rather than hanging or waiting on stdin. When neither candidate
+qualifies, a pure-bash fallback (`_run_with_timeout_fallback`) backgrounds the
+command, polls once a second, and kills it after 5 seconds, returning the same exit
+code (124) GNU `timeout` would. All three paths - real GNU `timeout`, `gtimeout`-only,
+and no limiter at all - are tested against a genuinely slow `claude` stub and checked
+against actual elapsed time, not just output shape: matching output alone doesn't
+prove which code path enforced the cutoff, only that one of them eventually did
+(`tests/unit/test_session_start_check.py`). Also checked for an orphaned background
+process after a kill on this machine; found none.
 
 **Never crashes the session**: every branch - `actually-done` missing, `claude`
 missing, `claude --version` failing or timing out, or its output not containing a

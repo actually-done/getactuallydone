@@ -33,14 +33,66 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 0
 fi
 
-if command -v timeout >/dev/null 2>&1; then
-  CLAUDE_VERSION_RAW=$(timeout 5 claude --version 2>/dev/null) || {
+# A real GNU-coreutils-compatible time limiter, if one is on PATH, checked by
+# behavior rather than name: stock macOS has no `timeout` at all (only `gtimeout`
+# via `brew install coreutils`), and on Windows, Git Bash's PATH usually carries
+# both Git's own GNU `timeout` *and* C:\Windows\System32\timeout.exe - a totally
+# different program (it waits N seconds or for a keypress; it does not run a
+# command and kill it). Which one `command -v timeout` finds depends on PATH
+# order, so name alone isn't enough - `--version` is: the Windows one doesn't
+# recognize the flag and errors immediately, never prints "GNU coreutils", and
+# critically never hangs waiting for input either, so probing it is safe.
+_find_limiter() {
+  local candidate
+  for candidate in timeout gtimeout; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" --version </dev/null 2>/dev/null | grep -qi "GNU coreutils"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Pure-bash fallback when no real limiter exists: background the command, poll
+# once a second, and kill it if it's still running after $1 seconds. Mirrors
+# GNU timeout's own exit code (124) on an actual timeout, so the caller's "||"
+# error handling doesn't need to know which path ran.
+_run_with_timeout_fallback() {
+  local seconds="$1"
+  shift
+  local outfile
+  outfile=$(mktemp)
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$!
+  local waited=0
+  while [ "$waited" -lt "$seconds" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -f "$outfile"
+    return 124
+  fi
+  wait "$pid"
+  local rc=$?
+  cat "$outfile"
+  rm -f "$outfile"
+  return "$rc"
+}
+
+LIMITER=$(_find_limiter) || LIMITER=""
+
+if [ -n "$LIMITER" ]; then
+  CLAUDE_VERSION_RAW=$("$LIMITER" 5 claude --version 2>/dev/null) || {
     warn "actually-done: 'claude --version' failed or timed out. If Claude Code is older than $_ONFAILURE_FLOOR, the push guard's onFailure safety net isn't available and it can fail open - please check manually."
     exit 0
   }
 else
-  CLAUDE_VERSION_RAW=$(claude --version 2>/dev/null) || {
-    warn "actually-done: 'claude --version' failed to run. If Claude Code is older than $_ONFAILURE_FLOOR, the push guard's onFailure safety net isn't available and it can fail open - please check manually."
+  CLAUDE_VERSION_RAW=$(_run_with_timeout_fallback 5 claude --version) || {
+    warn "actually-done: 'claude --version' failed or timed out. If Claude Code is older than $_ONFAILURE_FLOOR, the push guard's onFailure safety net isn't available and it can fail open - please check manually."
     exit 0
   }
 fi
