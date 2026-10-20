@@ -227,6 +227,12 @@ Re-checked against docs.github.com's rulesets reference for the allowed `actor_t
 
 Resolving the real numeric id needs a `gh api users/<username>` call, which conflicts with the existing, tested guarantee that `--dry-run` never calls `gh` at all (`test_dry_run_never_invokes_gh_at_all`). Resolved by only doing the lookup in real (non-`--dry-run`) runs; `--dry-run` prints a placeholder `actor_id` of `0` with an explicit stderr note that it's a placeholder, not a real id, and shows the `gh api` command a real run would use. Tests: `test_dry_run_bypass_actor_placeholder_is_explained`, `test_real_run_resolves_bypass_actor_id_via_gh` (stubs `gh` entirely to verify the real id ends up in the payload), `test_real_run_errors_when_user_lookup_fails`.
 
+## D14: `actually-done.yml` - handling a bootstrap base with no project yet
+
+Found on PR #1 (`v0.1-build` -> `main`), the PR that introduces this project to its own repo: `origin/main` was still GitHub's bare initial commit (`LICENSE` + a 2-line `README.md`, no `pyproject.toml`), so "Install the grader from base" failed immediately — `pip install -e ".[dev]"` against a directory with no `setup.py`/`pyproject.toml` errors out, not a bug in the PR's own code. The full-tier check is designed to verify a PR against an *existing* project on base; a bootstrap PR has no such base to defend yet, so there's nothing for the check to meaningfully run.
+
+**Decision:** added a `Check whether base has a project yet` step that tests `base/pyproject.toml` for existence and skips grader install, PR-dependency install, and verification when it's absent, instead posting an `evidence.md` explaining the skip. This can't be gamed by a PR's own content: the condition reads `base`'s checkout, fixed to `github.event.pull_request.base.sha`, which a PR's changes never touch. Once this PR merges, `main` has a real `pyproject.toml` and every subsequent PR runs the full check normally — this bootstrap path only ever fires once, for the PR that creates the project.
+
 ## Not re-verified (out of scope for v0.1, noted for ROADMAP)
 
 Mutation testing, size/complexity/duplication gates, held-out tests, and multi-agent adapters (Cursor/Codex/Copilot hook formats) are explicitly out of scope per the build prompt and were not researched against their respective docs. If a future version adds them, re-fetch Cursor's and Copilot's hook references rather than trusting solution.md's summaries, since only Claude Code's docs were verified here.

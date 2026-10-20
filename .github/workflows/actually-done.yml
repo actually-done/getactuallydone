@@ -30,10 +30,28 @@ jobs:
         with:
           python-version: "3.11"
 
+      # A PR cannot affect this check's result: it reads base's checkout, fixed
+      # to the PR's base sha, which the PR's own changes can never touch.
+      - name: Check whether base has a project yet
+        id: base-check
+        run: |
+          if [ -f base/pyproject.toml ]; then
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # The grader (actually-done itself, pytest, any test-tooling plugins) is
       # installed from base's own manifest, never the PR's - a PR can't bump or
       # patch its way around the thing that's grading it. See docs/DECISIONS.md.
+      #
+      # Skipped on a bootstrap base (no pyproject.toml at all): the first PR that
+      # introduces this project has no existing test suite or config on base for
+      # this check to defend yet, so there's nothing meaningful to install or run
+      # against. Every PR after that one has a real pyproject.toml on base and
+      # runs the full check normally.
       - name: Install the grader from base
+        if: steps.base-check.outputs.bootstrap == 'false'
         working-directory: base
         run: pip install -e ".[dev]"
 
@@ -41,14 +59,30 @@ jobs:
       # test run can import the PR's production code. Adjust this if your project
       # isn't pip-installable as-is.
       - name: Install PR runtime dependencies
+        if: steps.base-check.outputs.bootstrap == 'false'
         working-directory: pr
         run: pip install -e .
 
       - name: Run full-tier verification
+        if: steps.base-check.outputs.bootstrap == 'false'
         working-directory: pr
         run: |
           set -o pipefail
           actually-done verify --tier full --base ../base | tee ../evidence.md
+
+      - name: Note the bootstrap skip
+        if: steps.base-check.outputs.bootstrap == 'true'
+        run: |
+          cat > evidence.md <<'EOF'
+          ## actually-done full tier
+
+          Base branch has no `pyproject.toml` yet, so this looks like the PR that
+          introduces this project to it. There's no existing test suite or config
+          on base for this check to defend, so full-tier verification was
+          skipped. Every PR after this one will have this PR's own
+          `pyproject.toml` and test files as its base, and will run the real
+          check.
+          EOF
 
       - name: Upload evidence
         if: always()
