@@ -1,10 +1,11 @@
 """Git-diff inspection: which files changed in the working tree, and what kind they are.
 
 Everything here reads `git status --porcelain=v1 -z` against the working tree (uncommitted
-changes plus untracked files). Paths this tool itself creates (`.testmondata`, the
-`.actually-done/` cache dir) are filtered out unconditionally, independent of whatever the
-target repo's `.gitignore` says — otherwise our own state would make the working tree look
-"changed" on every subsequent run and defeat the hash-based cache in state.py.
+changes plus untracked files). Paths this tool itself creates (`.testmondata` and its SQLite
+WAL-mode sidecar files, the `.actually-done/` cache dir) are filtered out unconditionally,
+independent of whatever the target repo's `.gitignore` says — otherwise our own state would
+make the working tree look "changed" on every subsequent run and defeat the hash-based cache
+in state.py.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-_TOOL_OWNED_FILES = {".testmondata"}
+# pytest-testmon's db.py opens its SQLite file with `PRAGMA journal_mode = WAL`, which can
+# leave `-wal`/`-shm` (and, pre-WAL, `-journal`) sidecar files next to `.testmondata` - an
+# exact-name match alone missed these, so a prefix match covers the whole family.
+_TOOL_OWNED_FILE_PREFIXES = (".testmondata",)
 _TOOL_OWNED_DIR_PREFIX = ".actually-done/"
 
 
@@ -37,7 +41,9 @@ def changed_files(repo_root: Path) -> list[ChangedFile]:
 
 def _is_tool_owned(path: str) -> bool:
     normalized = path.replace("\\", "/")
-    return normalized in _TOOL_OWNED_FILES or normalized.startswith(_TOOL_OWNED_DIR_PREFIX)
+    if normalized.startswith(_TOOL_OWNED_DIR_PREFIX):
+        return True
+    return any(normalized.startswith(prefix) for prefix in _TOOL_OWNED_FILE_PREFIXES)
 
 
 def _parse_porcelain_z(raw: bytes) -> list[ChangedFile]:
