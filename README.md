@@ -8,11 +8,29 @@ against the PR's code is what actually decides. See [`solution.md`](solution.md)
 full design and [`docs/DECISIONS.md`](docs/DECISIONS.md) for where the current Claude
 Code docs confirmed or refined it.
 
+## Requirements
+
+- Python 3.11+
+- Claude Code **2.1.295 or later**, for the push guard's `onFailure: "block"` safety net
+  (`claude --version` to check; `claude update` to upgrade). On an older version, a
+  missing or crashing `actually-done` can fail *open* instead of blocking - see
+  `docs/DECISIONS.md`, D2/D11. The plugin warns about this at session start if it
+  detects an older version (or `actually-done` missing from `PATH` entirely).
+
 ## Install
+
+Install with [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/):
 
 ```bash
 uv tool install actually-done
+# or
+pipx install actually-done
 ```
+
+Use one of these, **not** `pip install` into a project's own virtualenv: the push guard
+and Stop hook run from Claude Code's own process, in whatever directory you're working
+in, so `actually-done` needs to be on your global `PATH` - not just active inside one
+project's venv. `uv tool install`/`pipx install` both do this for you.
 
 Then, from your project root, load the plugin (while developing or testing without a
 marketplace):
@@ -65,6 +83,12 @@ to re-run.
 - **Compact hook** (`SessionStart`, `compact` matcher): re-prints `AGENTS.md`'s
   critical-rules block into context after compaction, since CLAUDE.md/AGENTS.md are
   context the model can forget, not enforcement.
+- **Session-start check** (`SessionStart`, `startup|resume` matcher): warns, loudly, if
+  `actually-done` isn't on `PATH` at all (every Bash/PowerShell call would otherwise be
+  silently blocked by the push guard's `onFailure`, with no indication why) or if the
+  installed Claude Code is older than the `onFailure` floor this depends on. Never
+  blocks anything itself - it can't, `SessionStart` doesn't gate - and never crashes the
+  session even if `claude --version` itself fails or returns something unparseable.
 
 ## What it doesn't guarantee
 

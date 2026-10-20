@@ -8,9 +8,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- **Push guard** (`PreToolUse` hook): blocks `git push` in a Bash command however it's
-  spelled, by tokenizing the command like a shell would rather than pattern-matching
-  the literal text.
+- **Push guard** (`PreToolUse` hook, matched to `Bash|PowerShell`): blocks `git push`
+  however it's spelled, in either tool, by tokenizing the command the way the shell
+  that's actually running it would rather than pattern-matching the literal text.
+  Invokes `actually-done` directly (no shell wrapper), relying on `onFailure: "block"`
+  (Claude Code 2.1.295+) for "not installed" and "crashed".
 - **Fast tier** (`Stop` hook): runs affected tests (via `pytest-testmon` when
   installed) under a timeout when a source file changed, caches the result by
   working-tree hash, and blocks a fixable failure or halts when a human is needed
@@ -30,6 +32,9 @@ All notable changes to this project are documented in this file. The format is b
   defaults - idempotently, never overwriting existing content without `--force`.
 - **Compact hook** (`SessionStart`, `compact` matcher): re-prints `AGENTS.md`'s
   critical-rules block into context after compaction.
+- **Session-start check** (`SessionStart`, `startup|resume` matcher): warns if
+  `actually-done` isn't on `PATH` or if Claude Code is older than the `onFailure`
+  floor the push guard depends on. Never blocks or crashes the session.
 - An attack suite (`tests/attacks/`) demonstrating the 7 attacks each piece exists to
   catch, with a table in `README.md` mapping each to its test.
 - `scripts/clean_install_check.sh`: builds the wheel, installs it into a fresh venv,

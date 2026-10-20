@@ -1,9 +1,25 @@
 # Setup
 
+## 0. Requirements
+
+- Python 3.11+
+- Claude Code 2.1.295+, for the push guard's `onFailure: "block"` safety net
+  (`claude --version`; `claude update` to upgrade). On an older version, a missing
+  or crashing `actually-done` can fail *open* instead of blocking - see
+  `docs/DECISIONS.md`, D2/D11. The plugin's session-start check warns about this
+  automatically if it's not met.
+
 ## 1. Install
+
+Use [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/), not
+`pip install` into a project venv - the push guard and Stop hook run from Claude
+Code's own process in whatever directory you're working in, so `actually-done` needs
+to be on your global `PATH`, not just active inside one project's virtualenv.
 
 ```bash
 uv tool install actually-done
+# or
+pipx install actually-done
 ```
 
 ## 2. Load the plugin

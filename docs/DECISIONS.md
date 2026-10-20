@@ -141,6 +141,42 @@ Researched 2026-10-20 against code.claude.com/docs/en/tools-reference and hooks.
 
 **Known remaining limitation**: `Start-Process`'s heuristic match (co-occurrence of `git`/`git.exe` and an exact `push` word, not precise named-parameter parsing) could in principle be evaded by splitting the argument string into pieces that only concatenate to "push" at runtime (e.g. two separate `-ArgumentList` values joined later) - an absurd, deliberately-evasive case not chased here, in the same spirit as the POSIX side's own documented gaps (D8). `cmd /c`'s recursive re-tokenization uses the same tokenizer for the embedded string as the outer PowerShell statement, which is close enough for the spellings this guards against but isn't a true cmd.exe parser (cmd.exe has its own distinct escaping rules, e.g. `^` as its escape character, not modeled here).
 
+## D12: Session-start check for the onFailure floor and a missing install
+
+D11's push guard dropped its bash wrapper in favor of invoking `actually-done`
+directly and relying on `onFailure: "block"` (Claude Code 2.1.295+) for "not
+installed"/"crashed". That trade-off is invisible to a user on an older Claude Code,
+or one who hasn't installed `actually-done` yet at all - the push guard would simply
+never fire, with nothing to say why. A `SessionStart` hook matched to
+`startup|resume` (not `compact`, which is the existing rules-reinjection hook) now
+checks both conditions and warns via `systemMessage` when either holds.
+
+**Why a separate bash script, not an `actually-done hook` subcommand**: the whole
+point is to detect "`actually-done` isn't on `PATH`" - if the check itself were
+`actually-done hook session-check`, it would have the identical bootstrap problem
+it exists to report (the hook command couldn't start either). `plugin/scripts/
+session-start-check.sh` is dependency-free: `command -v` for both presence checks,
+and `claude --version` (wrapped in `timeout 5` when available, so a hang there can't
+delay every session start) parsed with `grep -oE` and compared numerically
+component-by-component against `2.1.295` - plain string comparison would wrongly
+order e.g. `2.1.9` above `2.1.10`. This is consistent with the Stop/compact hooks'
+existing bash dependency (D9), not a new category of gap.
+
+**Never crashes the session**: every branch - `actually-done` missing, `claude`
+missing, `claude --version` failing or timing out, or its output not containing a
+parseable version number - prints a valid `{"systemMessage": "..."}` and exits 0,
+never letting an unexpected shell error (e.g. `[: integer expression expected` from a
+malformed comparison) propagate past stderr. Tested directly via stubbed
+`actually-done`/`claude` executables on a controlled `PATH`, including the exact
+semver boundary (`2.1.294` warns, `2.1.295` and `2.2.0` and `3.0.0` don't) -
+`tests/unit/test_session_start_check.py`.
+
+**Config regression test**: `tests/unit/test_hooks_json.py` parses `hooks.json`
+directly and asserts the PreToolUse matcher covers exactly `{Bash, PowerShell}`, every
+PreToolUse hook entry has `onFailure: "block"`, and it still invokes `actually-done`
+directly rather than a wrapper - so a future edit that silently drops any of D11's
+three properties fails CI instead of waiting to be noticed in a diff.
+
 ## Not re-verified (out of scope for v0.1, noted for ROADMAP)
 
 Mutation testing, size/complexity/duplication gates, held-out tests, and multi-agent adapters (Cursor/Codex/Copilot hook formats) are explicitly out of scope per the build prompt and were not researched against their respective docs. If a future version adds them, re-fetch Cursor's and Copilot's hook references rather than trusting solution.md's summaries, since only Claude Code's docs were verified here.
