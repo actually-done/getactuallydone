@@ -1,11 +1,14 @@
 """Git-diff inspection: which files changed in the working tree, and what kind they are.
 
 Everything here reads `git status --porcelain=v1 -z` against the working tree (uncommitted
-changes plus untracked files). Paths this tool itself creates (`.testmondata` and its SQLite
-WAL-mode sidecar files, the `.actually-done/` cache dir) are filtered out unconditionally,
+changes plus untracked files). Paths this tool - or the pytest run it invokes - creates
+(`.testmondata` and its SQLite WAL-mode sidecar files, `__pycache__/` from importing the
+target's own code, the `.actually-done/` cache dir) are filtered out unconditionally,
 independent of whatever the target repo's `.gitignore` says — otherwise our own state would
 make the working tree look "changed" on every subsequent run and defeat the hash-based cache
-in state.py.
+in state.py. A repo with a permissive local/global gitignore can hide this locally (git never
+reports an ignored path as untracked in the first place) while a clean CI checkout, with no
+such gitignore, still sees it - confirmed the hard way, via a real CI-only cache-miss flake.
 """
 
 from __future__ import annotations
@@ -19,7 +22,9 @@ from pathlib import Path
 # leave `-wal`/`-shm` (and, pre-WAL, `-journal`) sidecar files next to `.testmondata` - an
 # exact-name match alone missed these, so a prefix match covers the whole family.
 _TOOL_OWNED_FILE_PREFIXES = (".testmondata",)
-_TOOL_OWNED_DIR_PREFIX = ".actually-done/"
+# Matched as a path COMPONENT, not just a root-level prefix: `__pycache__` can appear at any
+# depth (e.g. `tests/__pycache__/`), one per package directory Python actually imports from.
+_TOOL_OWNED_DIR_NAMES = {".actually-done", "__pycache__"}
 
 
 @dataclass(frozen=True)
@@ -41,7 +46,7 @@ def changed_files(repo_root: Path) -> list[ChangedFile]:
 
 def _is_tool_owned(path: str) -> bool:
     normalized = path.replace("\\", "/")
-    if normalized.startswith(_TOOL_OWNED_DIR_PREFIX):
+    if any(part in _TOOL_OWNED_DIR_NAMES for part in normalized.split("/")):
         return True
     return any(normalized.startswith(prefix) for prefix in _TOOL_OWNED_FILE_PREFIXES)
 

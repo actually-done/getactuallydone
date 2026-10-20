@@ -129,3 +129,27 @@ def test_working_tree_hash_ignores_testmon_wal_sidecar_files(repo: Path) -> None
     (repo / ".testmondata-shm").write_text("fake", encoding="utf-8")
     after = changes.working_tree_hash(repo)
     assert before == after
+
+
+def test_changed_files_hides_pycache_at_any_depth(repo: Path) -> None:
+    """__pycache__ appears as a side effect of running pytest (one per package
+    directory Python actually imports from), not something a user changed - found
+    via a real CI-only cache-miss flake (docs/DECISIONS.md, D15): a permissive
+    local/global .gitignore can hide this on a dev machine, since git never
+    reports an already-ignored path as untracked, while a clean CI checkout with
+    no such gitignore still sees it.
+    """
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "src.cpython-311.pyc").write_bytes(b"fake")
+    (repo / "tests" / "__pycache__").mkdir()
+    (repo / "tests" / "__pycache__" / "test_src.cpython-311.pyc").write_bytes(b"fake")
+    files = changes.changed_files(repo)
+    assert files == []
+
+
+def test_working_tree_hash_ignores_pycache_at_any_depth(repo: Path) -> None:
+    before = changes.working_tree_hash(repo)
+    (repo / "tests" / "__pycache__").mkdir()
+    (repo / "tests" / "__pycache__" / "test_src.cpython-311.pyc").write_bytes(b"fake")
+    after = changes.working_tree_hash(repo)
+    assert before == after
