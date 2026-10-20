@@ -183,6 +183,23 @@ def run_full_tier(
                 )
                 return result, evidence
 
+    # A run that collects zero tests looks identical to "nothing changed, all
+    # good" unless it's checked separately - and base finding zero at the
+    # configured unit_test_path too (not just an approved removal bringing the
+    # count down to zero, which baseline_count > 0 rules out below) means the
+    # path is wrong, misconfigured, or a PR repointed its own config to blind
+    # this check - not that there's genuinely nothing to verify.
+    if report.tests == 0 and baseline_count == 0:
+        result = FullResult(
+            status="fail",
+            summary=(
+                f"zero tests were collected at {config.unit_test_path!r} on both base and "
+                "the PR - nothing was verified"
+            ),
+            details=_tail(output),
+        )
+        return result, evidence
+
     result = FullResult(status="pass", summary=f"{report.tests} test(s) passed")
     return result, evidence
 

@@ -32,28 +32,45 @@ jobs:
 
       # A PR cannot affect this check's result: it reads base's checkout, fixed
       # to the PR's base sha, which the PR's own changes can never touch.
-      - name: Check whether base has a project yet
+      #
+      # "bootstrap" means base has never had this workflow at all - the PR that
+      # first introduces actually-done's CI to this repo. There's no prior base
+      # for the check to defend yet, so it's skipped rather than failed; every
+      # PR after that one has this file on base and runs for real. This is
+      # deliberately NOT keyed on base having a pyproject.toml: a base that
+      # already runs this workflow but happens to lack one (or a PR that
+      # deletes its own) still gets checked for real, just without a manifest
+      # to pin the grader's version from - see the next two steps.
+      - name: Check whether this is the PR that bootstraps the project
         id: base-check
         run: |
-          if [ -f base/pyproject.toml ]; then
+          if [ -f base/.github/workflows/actually-done.yml ]; then
             echo "bootstrap=false" >> "$GITHUB_OUTPUT"
           else
             echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f base/pyproject.toml ]; then
+            echo "has_manifest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_manifest=false" >> "$GITHUB_OUTPUT"
           fi
 
       # The grader (actually-done itself, pytest, any test-tooling plugins) is
       # installed from base's own manifest, never the PR's - a PR can't bump or
       # patch its way around the thing that's grading it. See docs/DECISIONS.md.
-      #
-      # Skipped on a bootstrap base (no pyproject.toml at all): the first PR that
-      # introduces this project has no existing test suite or config on base for
-      # this check to defend yet, so there's nothing meaningful to install or run
-      # against. Every PR after that one has a real pyproject.toml on base and
-      # runs the full check normally.
       - name: Install the grader from base
-        if: steps.base-check.outputs.bootstrap == 'false'
+        if: steps.base-check.outputs.bootstrap == 'false' && steps.base-check.outputs.has_manifest == 'true'
         working-directory: base
         run: pip install -e ".[dev]"
+
+      # base has no pyproject.toml to pin a grader version from (but does have
+      # this workflow, so it's not a bootstrap base) - fall back to an unpinned
+      # pytest rather than skipping, so base's own tests still get checked for
+      # real. actually-done's own config already defaults sanely when
+      # [tool.actually-done] is missing too (config.py).
+      - name: Install a default grader (base has no manifest to pin from)
+        if: steps.base-check.outputs.bootstrap == 'false' && steps.base-check.outputs.has_manifest == 'false'
+        run: pip install pytest
 
       # The PR's own runtime dependencies still need to be present so the sandboxed
       # test run can import the PR's production code. Adjust this if your project
@@ -76,12 +93,11 @@ jobs:
           cat > evidence.md <<'EOF'
           ## actually-done full tier
 
-          Base branch has no `pyproject.toml` yet, so this looks like the PR that
-          introduces this project to it. There's no existing test suite or config
-          on base for this check to defend, so full-tier verification was
-          skipped. Every PR after this one will have this PR's own
-          `pyproject.toml` and test files as its base, and will run the real
-          check.
+          **BOOTSTRAP: not verified.** Base branch has no
+          `.github/workflows/actually-done.yml` yet, so this is the PR that
+          introduces actually-done's CI to this repo - there's no prior base for
+          this check to defend, so verification was skipped. Every PR after this
+          one has this PR's own workflow file on base and runs the real check.
           EOF
 
       - name: Upload evidence

@@ -266,6 +266,52 @@ def test_catches_narrow_special_case_against_a_second_oracle_input(repo: Path) -
     assert "oracle" in result.summary.lower()
 
 
+def test_zero_tests_collected_fails_instead_of_passing_vacuously(repo: Path) -> None:
+    """A misconfigured/wrong unit_test_path (or a PR that repoints its own config to
+    one that finds nothing on base either) must not look like "all good" just
+    because nothing failed - nothing ran at all, so this has to fail, not pass.
+    Distinct from an approved removal (test_approved_removal_is_excluded_from_the_count),
+    where baseline_count is positive before the approval brings it down to zero.
+    """
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        '[tool.actually-done]\nunit_test_path = "tests"\n', encoding="utf-8"
+    )
+    (repo / "tests").mkdir()  # exists, but has no test_*.py files in it at all
+    base_sha = _commit(repo, "base: no tests")
+    (repo / "pkg.py").write_text(
+        "def add(a, b):\n    return a + b  # harmless comment\n", encoding="utf-8"
+    )
+    _commit(repo, "pr: still no tests")
+
+    result, evidence = _verify(repo, base_sha)
+    assert result.status == "fail"
+    assert evidence.tests_collected == 0
+
+
+def test_runs_against_base_tests_even_when_base_has_no_pyproject_toml(repo: Path) -> None:
+    """`run_full_tier` takes an already-resolved Config - it never reads base's
+    pyproject.toml itself, so base lacking one entirely (e.g. the very first PR
+    that introduces this project, or any project that just doesn't have one) must
+    not change the result: base's real tests still get found and run for real.
+    """
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    # Deliberately no pyproject.toml committed on base at all.
+    tests_dir = repo / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_pkg.py").write_text(
+        "from pkg import add\n\ndef test_add():\n    assert add(1, 2) == 3\n", encoding="utf-8"
+    )
+    base_sha = _commit(repo, "base: no pyproject.toml, but real tests")
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    _commit(repo, "pr: hidden break")
+
+    result, evidence = _verify(repo, base_sha)
+    assert result.status == "fail"
+    assert evidence.tests_collected == 1
+    assert "test_add" in result.details
+
+
 def test_approve_cli_round_trip(tmp_path: Path) -> None:
     (tmp_path / ".verify").mkdir()
     assert full.read_approved(tmp_path) == set()
