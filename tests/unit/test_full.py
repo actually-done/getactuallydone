@@ -184,6 +184,30 @@ def test_new_failing_test_fails_the_check(repo: Path) -> None:
     assert result.status == "fail"
 
 
+def test_failing_test_evidence_survives_output_truncation(repo: Path) -> None:
+    """full.py's own evidence only keeps the raw pytest output's last 80 lines
+    (_tail) - a failure's traceback can get pushed out entirely by other output.
+    The per-test failing_tests list, parsed straight from the JUnit report, is
+    rendered unconditionally instead, so the test id and a real summary of what
+    broke survive regardless of how much other output precedes them.
+    """
+    base_sha = _write_base(repo)
+    (repo / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    _commit(repo, "pr: hidden break")
+
+    result, evidence = _verify(repo, base_sha)
+    assert result.status == "fail"
+    assert evidence.failing_tests
+    test_id, first_line = evidence.failing_tests[0]
+    assert "test_add" in test_id
+    assert first_line  # a real, non-empty summary of what broke, not a blank line
+
+    markdown = full.render_evidence_markdown(evidence, result)
+    assert "**Failing tests:**" in markdown
+    assert test_id in markdown
+    assert first_line in markdown
+
+
 def test_oracle_test_must_really_pass_not_just_be_collected(repo: Path) -> None:
     """A still-unimplemented boundary case stays a real failure under --runxfail,
     not a silently-green xfail - so forgetting it fails the check even though

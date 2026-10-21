@@ -56,6 +56,7 @@ class JunitReport:
     failures: int = 0
     errors: int = 0
     skipped: int = 0
+    failing: tuple[tuple[str, str], ...] = ()  # (test id, first line of its message)
 
 
 @dataclass
@@ -65,6 +66,7 @@ class Evidence:
     commands: list[tuple[str, int]] = field(default_factory=list)
     new_test_files: int = 0
     tests_collected: int = 0
+    failing_tests: tuple[tuple[str, str], ...] = ()
 
 
 def read_approved(base_root: Path) -> set[str]:
@@ -145,6 +147,7 @@ def run_full_tier(
         )
         report = _parse_junit(junit_path)
         evidence.tests_collected = report.tests
+        evidence.failing_tests = report.failing
 
         mismatch = _cross_check(returncode, report)
         if mismatch:
@@ -178,6 +181,7 @@ def run_full_tier(
                 sandbox, "tests/oracle", oracle_junit, evidence, extra_args=["--runxfail"]
             )
             if oracle_rc != 0:
+                evidence.failing_tests = _parse_junit(oracle_junit).failing
                 result = FullResult(
                     status="fail", summary="oracle test(s) failed", details=_tail(oracle_output)
                 )
@@ -218,6 +222,9 @@ def render_evidence_markdown(evidence: Evidence, result: FullResult) -> str:
         "| --- | --- |",
     ]
     lines += [f"| `{cmd}` | {code} |" for cmd, code in evidence.commands]
+    if evidence.failing_tests:
+        lines += ["", "**Failing tests:**", ""]
+        lines += [f"- `{test_id}` - {first_line}" for test_id, first_line in evidence.failing_tests]
     if result.details:
         lines += [
             "",
@@ -385,7 +392,43 @@ def _parse_junit(path: Path) -> JunitReport:
         failures=int(suite.get("failures", 0)),
         errors=int(suite.get("errors", 0)),
         skipped=int(suite.get("skipped", 0)),
+        failing=tuple(_junit_failures(suite)),
     )
+
+
+def _junit_failures(suite: ET.Element) -> list[tuple[str, str]]:
+    """Every <testcase> with a <failure>/<error> child: its test id and the first
+    non-blank line of that child's message - so a human reading the evidence
+    comment sees exactly what broke without having to dig through raw pytest
+    output (which full.py's own evidence only ever keeps the last 80 lines of).
+    """
+    failing: list[tuple[str, str]] = []
+    for case in suite.findall("testcase"):
+        problem = case.find("failure")
+        if problem is None:
+            problem = case.find("error")
+        if problem is None:
+            continue
+        message = problem.get("message") or problem.text or ""
+        failing.append((_junit_test_id(case), _first_nonblank_line(message)))
+    return failing
+
+
+def _junit_test_id(case: ET.Element) -> str:
+    name = case.get("name", "")
+    file = case.get("file")
+    if file:
+        return f"{file}::{name}"
+    classname = case.get("classname", "")
+    return f"{classname}::{name}" if classname else name
+
+
+def _first_nonblank_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return "(no message)"
 
 
 def _cross_check(returncode: int, report: JunitReport) -> str | None:
