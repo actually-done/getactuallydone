@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from actually_done import cli
+from actually_done import cli, full
 
 
 def _run_pre_bash(
@@ -228,6 +228,45 @@ def test_verify_full_tier_catches_hidden_break(
     assert "test_add" in out
 
 
+def test_verify_full_tier_still_uses_base_tests_when_pr_deletes_pyproject_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A PR deleting its own pyproject.toml can't escape verification this way -
+    config just falls back to defaults (config.py), and base's real tests (found
+    at the default unit_test_path) still get checked for real.
+    """
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.actually-done]\nunit_test_path = "tests/unit"\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests" / "unit"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_pkg.py").write_text(
+        "import sys\nsys.path.insert(0, '.')\nfrom pkg import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    (tmp_path / "pyproject.toml").unlink()
+    (tmp_path / "pkg.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "pr: delete pyproject.toml + hidden break")
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = cli.main(["verify", "--tier", "full", "--base", base_sha])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "test_add" in out
+
+
 def test_approve_writes_verify_approved(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = cli.main(["approve", "tests/test_pkg.py::test_add"])
     assert exit_code == 0
@@ -236,7 +275,42 @@ def test_approve_writes_verify_approved(repo: Path, capsys: pytest.CaptureFixtur
     assert "approved 1 test id(s)" in capsys.readouterr().out
 
 
+def test_approve_to_ref_binds_both_base_and_new_content_hash(repo: Path) -> None:
+    """`--to <ref>` hashes the file's content AT that ref - not the working
+    tree's current content - as the approved NEW version, writing a
+    three-field entry (base hash + approved new hash), distinct from the
+    working-tree-only two-field form the other approve tests exercise.
+    """
+    base_hash = full.file_hash(repo / "tests" / "test_pkg.py")
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("checkout", "-q", "-b", "fix-branch")
+    fixed_content = (
+        "import sys\nsys.path.insert(0, '.')\nfrom pkg import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n    assert add(2, 2) == 4\n"
+    )
+    (repo / "tests" / "test_pkg.py").write_text(fixed_content, encoding="utf-8")
+    expected_new_hash = full.file_hash(repo / "tests" / "test_pkg.py")
+    git("add", "-A")
+    git("commit", "-q", "-m", "fix")
+    fixed_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-q", "-")  # back to the original branch, original content
+
+    assert full.file_hash(repo / "tests" / "test_pkg.py") == base_hash  # confirm restored
+
+    exit_code = cli.main(["approve", "--to", fixed_sha, "tests/test_pkg.py::test_add"])
+    assert exit_code == 0
+    content = (repo / ".verify" / "approved").read_text(encoding="utf-8")
+    assert content.strip() == f"tests/test_pkg.py::test_add {base_hash} {expected_new_hash}"
+
+
 def test_approve_is_additive(repo: Path) -> None:
+    # approve now needs a real file to hash (it binds each entry to the file's
+    # current content - see cli.py's _cmd_approve), so each id names a real file.
+    (repo / "tests" / "a.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (repo / "tests" / "b.py").write_text("def test_y():\n    pass\n", encoding="utf-8")
     cli.main(["approve", "tests/a.py::test_x"])
     cli.main(["approve", "tests/b.py::test_y"])
     content = (repo / ".verify" / "approved").read_text(encoding="utf-8")

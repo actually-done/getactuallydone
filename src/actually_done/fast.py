@@ -8,6 +8,7 @@ invocation against the same uncommitted change doesn't re-run anything.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -76,6 +77,7 @@ def _run_pytest(repo_root: Path, config: Config) -> FastResult:
             capture_output=True,
             text=True,
             timeout=config.fast_timeout_seconds,
+            env=_pytest_env(),
         )
     except subprocess.TimeoutExpired:
         return FastResult(
@@ -104,6 +106,22 @@ def _run_pytest(repo_root: Path, config: Config) -> FastResult:
         summary=f"pytest exited with code {completed.returncode} (not a normal test failure)",
         details=tail,
     )
+
+
+def _pytest_env() -> dict[str, str]:
+    """`find_spec("testmon")` only checks the plugin is importable, not that pytest
+    will actually register it - if this process inherited
+    `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` from whatever called it (e.g. actually-done's
+    own full-tier check, which sets it on the sandboxed pytest run it spawns, for a
+    different reason: denying a PR's own conftest.py/plugins a say in its result),
+    that var would otherwise propagate down to this subprocess too and make
+    `--testmon` an unrecognized argument (pytest exits 4), since autoload is how
+    testmon's plugin actually gets registered. This subprocess has no reason to
+    inherit that lockdown - it only ever runs our own trusted test suite.
+    """
+    env = dict(os.environ)
+    env.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+    return env
 
 
 def _parse_failing_tests(output: str) -> list[str]:

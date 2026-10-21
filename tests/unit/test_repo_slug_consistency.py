@@ -8,10 +8,24 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXPECTED = "actually-done/actually-done"
+_NON_SOURCE_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".actually-done",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+}
 
 # Matches an `actually-done/<name>` slug, e.g. in a URL, an install command, or
 # a trusted-publisher setting. Excludes `.actually-done/...` (the unrelated
@@ -23,14 +37,22 @@ _SLUG_RE = re.compile(r"(?<![\w.])actually-done/[A-Za-z0-9_.-]+")
 
 
 def _tracked_files() -> list[Path]:
-    output = subprocess.run(
-        ["git", "ls-files"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return [_REPO_ROOT / line for line in output.splitlines() if line]
+    """`git ls-files` when `_REPO_ROOT` is a real git checkout; a plain filesystem
+    walk otherwise - e.g. inside full.py's own sandbox, which deliberately
+    excludes `.git` from the copy it runs pytest against (`_SANDBOX_EXCLUDES`),
+    so this test has no git repo to ask when the full-tier check runs itself.
+    """
+    completed = subprocess.run(
+        ["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True
+    )
+    if completed.returncode == 0:
+        return [_REPO_ROOT / line for line in completed.stdout.splitlines() if line]
+    return [
+        p
+        for p in _REPO_ROOT.rglob("*")
+        if p.is_file()
+        and not any(part in _NON_SOURCE_DIRS for part in p.relative_to(_REPO_ROOT).parts)
+    ]
 
 
 def test_only_one_actually_done_owner_repo_string_appears_anywhere() -> None:
@@ -52,3 +74,27 @@ def test_only_one_actually_done_owner_repo_string_appears_anywhere() -> None:
         f"found owner/repo string(s) other than {_EXPECTED!r}: "
         f"{ {slug: files for slug, files in found.items() if slug != _EXPECTED} }"
     )
+
+
+def test_tracked_files_fallback_handles_binary_files_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The non-git fallback walk (full.py's own sandbox excludes .git, so this is
+    the path that actually runs during this project's own full-tier CI check)
+    must include binary files without erroring itself - it's the caller's read
+    loop, wrapped in try/except (UnicodeDecodeError, OSError), that skips them.
+    Proves that combination doesn't crash on a real binary file, not just that
+    it theoretically should.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
+    (tmp_path / "image.bin").write_bytes(bytes(range(256)))
+    (tmp_path / "README.md").write_text("actually-done/actually-done\n", encoding="utf-8")
+
+    files = _tracked_files()
+    assert any(p.name == "image.bin" for p in files)
+
+    for path in files:
+        try:
+            path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue  # exactly what the real test's own read loop does

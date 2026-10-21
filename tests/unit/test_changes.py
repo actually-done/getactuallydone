@@ -62,6 +62,19 @@ def test_changed_files_hides_tool_owned_paths(repo: Path) -> None:
     assert files == []
 
 
+def test_changed_files_hides_testmon_wal_sidecar_files(repo: Path) -> None:
+    """pytest-testmon's db.py opens .testmondata with `PRAGMA journal_mode = WAL`,
+    which can leave `-wal`/`-shm` sidecar files on disk next to it - an exact-name
+    match alone missed these, letting them make the working tree look "changed" on
+    every subsequent fast-tier run and defeat its cache (found via a real CI
+    failure: test_fast.py::test_result_is_cached_by_working_tree_hash).
+    """
+    (repo / ".testmondata-wal").write_text("fake", encoding="utf-8")
+    (repo / ".testmondata-shm").write_text("fake", encoding="utf-8")
+    files = changes.changed_files(repo)
+    assert files == []
+
+
 def test_any_source_changed_true_for_py_edit(repo: Path) -> None:
     (repo / "src.py").write_text("x = 2\n", encoding="utf-8")
     files = changes.changed_files(repo)
@@ -106,5 +119,37 @@ def test_working_tree_hash_changes_with_edit(repo: Path) -> None:
 def test_working_tree_hash_ignores_tool_owned_paths(repo: Path) -> None:
     before = changes.working_tree_hash(repo)
     (repo / ".testmondata").write_text("fake", encoding="utf-8")
+    after = changes.working_tree_hash(repo)
+    assert before == after
+
+
+def test_working_tree_hash_ignores_testmon_wal_sidecar_files(repo: Path) -> None:
+    before = changes.working_tree_hash(repo)
+    (repo / ".testmondata-wal").write_text("fake", encoding="utf-8")
+    (repo / ".testmondata-shm").write_text("fake", encoding="utf-8")
+    after = changes.working_tree_hash(repo)
+    assert before == after
+
+
+def test_changed_files_hides_pycache_at_any_depth(repo: Path) -> None:
+    """__pycache__ appears as a side effect of running pytest (one per package
+    directory Python actually imports from), not something a user changed - found
+    via a real CI-only cache-miss flake (docs/DECISIONS.md, D15): a permissive
+    local/global .gitignore can hide this on a dev machine, since git never
+    reports an already-ignored path as untracked, while a clean CI checkout with
+    no such gitignore still sees it.
+    """
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "src.cpython-311.pyc").write_bytes(b"fake")
+    (repo / "tests" / "__pycache__").mkdir()
+    (repo / "tests" / "__pycache__" / "test_src.cpython-311.pyc").write_bytes(b"fake")
+    files = changes.changed_files(repo)
+    assert files == []
+
+
+def test_working_tree_hash_ignores_pycache_at_any_depth(repo: Path) -> None:
+    before = changes.working_tree_hash(repo)
+    (repo / "tests" / "__pycache__").mkdir()
+    (repo / "tests" / "__pycache__" / "test_src.cpython-311.pyc").write_bytes(b"fake")
     after = changes.working_tree_hash(repo)
     assert before == after

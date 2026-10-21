@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -211,7 +212,9 @@ def _cmd_verify_full(args: argparse.Namespace, repo_root: Path, config: config_m
         print("error: --tier full requires --base <ref-or-path>", file=sys.stderr)
         return 2
     with full.materialize_base(repo_root, args.base) as base_root:
-        result, evidence = full.run_full_tier(repo_root, base_root, config, base_ref=args.base)
+        result, evidence = full.run_full_tier(
+            repo_root, base_root, config, base_ref=args.base, python=args.python
+        )
     print(full.render_evidence_markdown(evidence, result))
     return 0 if result.status == "pass" else 1
 
@@ -225,17 +228,69 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
+    """Each id is bound to a SHA-256 of the content of the file it names, right
+    now, in this working tree - not just the bare id string. See full.py's
+    _parse_approved for why: an unbound id would stay "approved" forever for
+    whatever later happens to carry that same id, including an unrelated new
+    test that reuses a deleted file's path. Run this on base (e.g. after
+    merging to main) - full.py's checks only ever look at base's own content,
+    so an approval granted inside a PR's own branch has no effect on that PR.
+
+    `--to <ref>` additionally hashes the file's content AT that git ref and
+    records it as the approved NEW version - the full-tier check then accepts
+    the PR's content in place of base's for that file, and runs it for real,
+    but only if it matches that recorded hash exactly. Without `--to`, this
+    approves the CURRENT working-tree content for removal/skipping, as before.
+
+    `--to`'s hash comes from an actual checkout of that ref (`full.materialize_base`,
+    the same worktree-based materialization `verify --tier full` itself uses for
+    base), not `git show <ref>:<path>`'s raw blob bytes - those can differ from
+    what ends up on disk (line-ending normalization on checkout, e.g. LF stored
+    vs. CRLF checked out under `core.autocrlf`), and the hash recorded here has
+    to match what `_parse_approved` actually reads from the PR's own checkout
+    at verify time, not what's stored in git's object database.
+    """
     repo_root = Path.cwd()
     path = repo_root / ".verify" / "approved"
-    existing: set[str] = set()
+    existing: dict[str, tuple[str, ...]] = {}
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             entry = line.split("#", 1)[0].strip()
-            if entry:
-                existing.add(entry)
-    existing.update(args.test_ids)
+            if not entry:
+                continue
+            parts = entry.split()
+            if len(parts) in (2, 3):
+                existing[parts[0]] = tuple(parts[1:])
+
+    for test_id in args.test_ids:
+        rel_path = test_id.split("::", 1)[0]
+        file_path = repo_root / rel_path
+        if not file_path.is_file():
+            print(f"error: {file_path} does not exist - can't approve {test_id}", file=sys.stderr)
+            return 1
+        base_hash = full.file_hash(file_path)
+
+        if args.to is None:
+            existing[test_id] = (base_hash,)
+            continue
+
+        try:
+            with full.materialize_base(repo_root, args.to) as ref_root:
+                ref_file = ref_root / rel_path
+                if not ref_file.is_file():
+                    print(
+                        f"error: {rel_path!r} does not exist at ref {args.to!r}", file=sys.stderr
+                    )
+                    return 1
+                new_hash = full.file_hash(ref_file)
+        except subprocess.CalledProcessError as exc:
+            print(f"error: couldn't check out ref {args.to!r} - {exc}", file=sys.stderr)
+            return 1
+        existing[test_id] = (base_hash, new_hash)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
+    lines = [f"{test_id} {' '.join(hashes)}" for test_id, hashes in sorted(existing.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"approved {len(args.test_ids)} test id(s); {len(existing)} total in {path}")
     return 0
 
@@ -268,11 +323,33 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument(
         "--base", default=None, help="Base ref or checkout path (required for --tier full)"
     )
+    verify_parser.add_argument(
+        "--python",
+        default=None,
+        help=(
+            "Interpreter to run the PR's own test suite with (--tier full only). "
+            "Defaults to this process's own interpreter. Pass this when the grader "
+            "runs isolated from the PR's installed dependencies, in a separate "
+            "environment with its own python (see docs/DECISIONS.md, D20)."
+        ),
+    )
 
     approve_parser = subparsers.add_parser(
         "approve", help="Approve test ids for removal/skipping in the full tier"
     )
     approve_parser.add_argument("test_ids", nargs="+", metavar="TEST_ID")
+    approve_parser.add_argument(
+        "--to",
+        default=None,
+        metavar="REF",
+        help=(
+            "Approve a specific EDIT: hash the file's content at this git ref as "
+            "the new, accepted version. The full tier then runs the PR's version "
+            "for real in place of base's, but only if it matches exactly. "
+            "Without this, approves the current working-tree content for "
+            "removal/skipping, as before."
+        ),
+    )
 
     init_parser = subparsers.add_parser("init", help="Scaffold CI, CODEOWNERS, and rules files")
     init_parser.add_argument("--force", action="store_true", help="Overwrite existing files")
