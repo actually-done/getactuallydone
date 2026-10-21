@@ -276,6 +276,10 @@ def test_approve_writes_verify_approved(repo: Path, capsys: pytest.CaptureFixtur
 
 
 def test_approve_is_additive(repo: Path) -> None:
+    # approve now needs a real file to hash (it binds each entry to the file's
+    # current content - see cli.py's _cmd_approve), so each id names a real file.
+    (repo / "tests" / "a.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (repo / "tests" / "b.py").write_text("def test_y():\n    pass\n", encoding="utf-8")
     cli.main(["approve", "tests/a.py::test_x"])
     cli.main(["approve", "tests/b.py::test_y"])
     content = (repo / ".verify" / "approved").read_text(encoding="utf-8")

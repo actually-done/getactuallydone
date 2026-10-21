@@ -225,17 +225,36 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
+    """Each id is bound to a SHA-256 of the content of the file it names, right
+    now, in this working tree - not just the bare id string. See full.py's
+    read_approved for why: an unbound id would stay "approved" forever for
+    whatever later happens to carry that same id, including an unrelated new
+    test that reuses a deleted file's path. Run this on base (e.g. after
+    merging to main) - read_approved only ever looks at base's own content, so
+    an approval granted inside a PR's own branch has no effect on that PR.
+    """
     repo_root = Path.cwd()
     path = repo_root / ".verify" / "approved"
-    existing: set[str] = set()
+    existing: dict[str, str] = {}
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             entry = line.split("#", 1)[0].strip()
-            if entry:
-                existing.add(entry)
-    existing.update(args.test_ids)
+            if not entry:
+                continue
+            parts = entry.split()
+            if len(parts) == 2:
+                existing[parts[0]] = parts[1]
+
+    for test_id in args.test_ids:
+        file_path = repo_root / test_id.split("::", 1)[0]
+        if not file_path.is_file():
+            print(f"error: {file_path} does not exist - can't approve {test_id}", file=sys.stderr)
+            return 1
+        existing[test_id] = full.file_hash(file_path)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
+    lines = [f"{test_id} {digest}" for test_id, digest in sorted(existing.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"approved {len(args.test_ids)} test id(s); {len(existing)} total in {path}")
     return 0
 

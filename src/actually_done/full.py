@@ -12,6 +12,7 @@ removal. Run pytest there.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -69,17 +70,42 @@ class Evidence:
     failing_tests: tuple[tuple[str, str], ...] = ()
 
 
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def read_approved(base_root: Path) -> set[str]:
-    """Test node ids a human has approved for removal or skipping, read from base."""
+    """Test ids a human has approved for removal or skipping, read from base -
+    each one bound to a SHA-256 of the content of the file it names, recorded at
+    approval time (`actually-done approve`, cli.py's `_cmd_approve`). A bare id
+    with no recorded hash (an unparseable line, or one not currently matching a
+    real file's content on base) is never honored: it isn't "approved with a
+    stale binding," it's simply not approved - the test runs for real again.
+
+    This closes a real gap: matching on the id string alone would let one
+    approval, once merged, cover ANY future test that happens to share that
+    exact id - including a file deleted and later recreated at the same path
+    (a new file, so common_tests' "base's content always wins" lock doesn't
+    apply to it at all), or a stale entry whose original file is long gone
+    quietly discounting the required test count for an unrelated deletion
+    forever (`expected_minimum = baseline_count - len(approved)`).
+    """
     path = base_root / ".verify" / "approved"
     if not path.is_file():
         return set()
-    ids = set()
+    approved: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         entry = line.split("#", 1)[0].strip()
-        if entry:
-            ids.add(entry)
-    return ids
+        if not entry:
+            continue
+        parts = entry.split()
+        if len(parts) != 2:
+            continue  # malformed/legacy bare-id entry - not approved, not honored
+        test_id, recorded_hash = parts
+        file_path = base_root / test_id.split("::", 1)[0]
+        if file_path.is_file() and file_hash(file_path) == recorded_hash:
+            approved.add(test_id)
+    return approved
 
 
 @contextmanager

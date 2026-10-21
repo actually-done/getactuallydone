@@ -129,7 +129,13 @@ def test_catches_deleted_test_as_a_count_drop(repo: Path) -> None:
 def test_approved_removal_is_excluded_from_the_count(repo: Path) -> None:
     _write_base(repo)
     (repo / ".verify").mkdir()
-    (repo / ".verify" / "approved").write_text("tests/test_pkg.py::test_add\n", encoding="utf-8")
+    # Bound to the file's content at approval time (full.read_approved verifies
+    # this SHA-256 against base's current content - docs/DECISIONS.md, D18),
+    # not just the bare id string.
+    digest = full.file_hash(repo / "tests" / "test_pkg.py")
+    (repo / ".verify" / "approved").write_text(
+        f"tests/test_pkg.py::test_add {digest}\n", encoding="utf-8"
+    )
     approved_sha = _commit(repo, "approve removal")  # base now carries the approval
 
     (repo / "tests" / "test_pkg.py").unlink()
@@ -337,9 +343,51 @@ def test_runs_against_base_tests_even_when_base_has_no_pyproject_toml(repo: Path
 
 
 def test_approve_cli_round_trip(tmp_path: Path) -> None:
+    # Each entry is bound to a SHA-256 of the file it names, not just a bare id
+    # (docs/DECISIONS.md, D18) - read_approved needs real files to hash against.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_b.py").write_text("def test_y():\n    pass\n", encoding="utf-8")
+    digest_a = full.file_hash(tmp_path / "tests" / "test_a.py")
+    digest_b = full.file_hash(tmp_path / "tests" / "test_b.py")
+
     (tmp_path / ".verify").mkdir()
     assert full.read_approved(tmp_path) == set()
     (tmp_path / ".verify" / "approved").write_text(
-        "tests/test_a.py::test_x\n# a comment\n\ntests/test_b.py::test_y\n", encoding="utf-8"
+        f"tests/test_a.py::test_x {digest_a}\n# a comment\n\ntests/test_b.py::test_y {digest_b}\n",
+        encoding="utf-8",
     )
     assert full.read_approved(tmp_path) == {"tests/test_a.py::test_x", "tests/test_b.py::test_y"}
+
+
+def test_read_approved_ignores_a_bare_id_with_no_hash(tmp_path: Path) -> None:
+    """A legacy/malformed entry (no recorded hash) is not honored at all - fails
+    closed, exactly as if that id had never been approved, rather than treating
+    an unparseable line as a blanket approval.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (tmp_path / ".verify").mkdir()
+    (tmp_path / ".verify" / "approved").write_text("tests/test_a.py::test_x\n", encoding="utf-8")
+    assert full.read_approved(tmp_path) == set()
+
+
+def test_read_approved_voids_a_stale_hash_when_file_content_changes(tmp_path: Path) -> None:
+    """The exact attack this binding closes: an approval recorded for one
+    version of a file must not keep covering a later, different version of the
+    same file (see tests/attacks/test_attack_08_stale_test_approval.py for the
+    full end-to-end scenario against run_full_tier).
+    """
+    (tmp_path / "tests").mkdir()
+    test_file = tmp_path / "tests" / "test_a.py"
+    test_file.write_text("def test_x():\n    pass\n", encoding="utf-8")
+    digest = full.file_hash(test_file)
+
+    (tmp_path / ".verify").mkdir()
+    (tmp_path / ".verify" / "approved").write_text(
+        f"tests/test_a.py::test_x {digest}\n", encoding="utf-8"
+    )
+    assert full.read_approved(tmp_path) == {"tests/test_a.py::test_x"}
+
+    test_file.write_text("def test_x():\n    assert False\n", encoding="utf-8")
+    assert full.read_approved(tmp_path) == set()
