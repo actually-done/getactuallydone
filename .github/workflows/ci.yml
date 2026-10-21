@@ -1,0 +1,49 @@
+name: ci
+
+# This repo's own development CI - pytest/ruff/mypy across the OSes contributors
+# actually develop and deploy on. Separate from actually-done.yml, the dogfooded
+# full-tier check: that one verifies this *tool* catches attacks against an
+# arbitrary target project; this one just verifies this *codebase* itself is
+# healthy. Added after two test-only bugs (docs/DECISIONS.md, D15) shipped
+# unnoticed because nothing had ever run this suite on Linux before the
+# full-tier check's own sandbox did, for the first time, by accident.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy
+        run: mypy src
