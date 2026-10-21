@@ -363,13 +363,15 @@ def test_approve_cli_round_trip(tmp_path: Path) -> None:
 def test_read_approved_ignores_a_bare_id_with_no_hash(tmp_path: Path) -> None:
     """A legacy/malformed entry (no recorded hash) is not honored at all - fails
     closed, exactly as if that id had never been approved, rather than treating
-    an unparseable line as a blanket approval.
+    an unparseable line as a blanket approval. read_approval_errors surfaces it
+    separately, so run_full_tier can fail loudly instead of staying silent.
     """
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_a.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
     (tmp_path / ".verify").mkdir()
     (tmp_path / ".verify" / "approved").write_text("tests/test_a.py::test_x\n", encoding="utf-8")
     assert full.read_approved(tmp_path) == set()
+    assert full.read_approval_errors(tmp_path) == ["tests/test_a.py::test_x"]
 
 
 def test_read_approved_voids_a_stale_hash_when_file_content_changes(tmp_path: Path) -> None:
@@ -391,3 +393,22 @@ def test_read_approved_voids_a_stale_hash_when_file_content_changes(tmp_path: Pa
 
     test_file.write_text("def test_x():\n    assert False\n", encoding="utf-8")
     assert full.read_approved(tmp_path) == set()
+
+
+def test_legacy_bare_id_approval_fails_the_check_loudly(repo: Path) -> None:
+    """A malformed/legacy-format .verify/approved entry (pre-D18: a bare id,
+    no recorded hash) must not be silently dropped - run_full_tier fails loudly
+    instead, so a human finds out their approval isn't in effect right away,
+    not later when an unrelated count-drop or a since-fixed test surprises them.
+    """
+    _write_base(repo)
+    (repo / ".verify").mkdir()
+    (repo / ".verify" / "approved").write_text("tests/test_pkg.py::test_add\n", encoding="utf-8")
+    base_sha = _commit(repo, "base: legacy bare-id approval entry")
+    (repo / "README.md").write_text("harmless\n", encoding="utf-8")
+    _commit(repo, "pr: unrelated change")
+
+    result, _evidence = _verify(repo, base_sha)
+    assert result.status == "error"
+    assert "legacy approval format" in result.summary
+    assert "tests/test_pkg.py::test_add" in result.details

@@ -74,38 +74,57 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def read_approved(base_root: Path) -> set[str]:
-    """Test ids a human has approved for removal or skipping, read from base -
-    each one bound to a SHA-256 of the content of the file it names, recorded at
-    approval time (`actually-done approve`, cli.py's `_cmd_approve`). A bare id
-    with no recorded hash (an unparseable line, or one not currently matching a
-    real file's content on base) is never honored: it isn't "approved with a
-    stale binding," it's simply not approved - the test runs for real again.
+def _parse_approved(base_root: Path) -> tuple[set[str], list[str]]:
+    """Returns (valid approved ids, legacy/malformed entry text) from base's
+    `.verify/approved`. Each valid entry is `<test id> <sha256>`, bound to the
+    content of the file it names at approval time (`actually-done approve`,
+    cli.py's `_cmd_approve`) and re-verified against base's CURRENT content here
+    - a file that no longer matches its recorded hash (edited, or deleted and
+    recreated) voids that one entry: not "approved with a stale binding,"
+    simply not approved, so the test runs for real again.
 
-    This closes a real gap: matching on the id string alone would let one
+    Binding closes a real gap: matching on the id string alone would let one
     approval, once merged, cover ANY future test that happens to share that
     exact id - including a file deleted and later recreated at the same path
     (a new file, so common_tests' "base's content always wins" lock doesn't
     apply to it at all), or a stale entry whose original file is long gone
     quietly discounting the required test count for an unrelated deletion
     forever (`expected_minimum = baseline_count - len(approved)`).
+
+    A line that isn't `<id> <hash>` at all - almost always a leftover from
+    before approvals were bound to content - is neither silently honored NOR
+    silently dropped: `run_full_tier` fails loudly on any legacy entry rather
+    than letting a human discover later that an approval they thought was in
+    effect never actually was.
     """
     path = base_root / ".verify" / "approved"
     if not path.is_file():
-        return set()
+        return set(), []
     approved: set[str] = set()
+    legacy: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         entry = line.split("#", 1)[0].strip()
         if not entry:
             continue
         parts = entry.split()
         if len(parts) != 2:
-            continue  # malformed/legacy bare-id entry - not approved, not honored
+            legacy.append(entry)
+            continue
         test_id, recorded_hash = parts
         file_path = base_root / test_id.split("::", 1)[0]
         if file_path.is_file() and file_hash(file_path) == recorded_hash:
             approved.add(test_id)
-    return approved
+    return approved, legacy
+
+
+def read_approved(base_root: Path) -> set[str]:
+    """Test ids currently validly approved - see `_parse_approved`."""
+    return _parse_approved(base_root)[0]
+
+
+def read_approval_errors(base_root: Path) -> list[str]:
+    """Legacy/malformed `.verify/approved` entries - see `_parse_approved`."""
+    return _parse_approved(base_root)[1]
 
 
 @contextmanager
@@ -140,6 +159,20 @@ def run_full_tier(
     pr_root: Path, base_root: Path, config: Config, base_ref: str = ""
 ) -> tuple[FullResult, Evidence]:
     evidence = Evidence(base_ref=base_ref or str(base_root), pr_commit=_rev_parse(pr_root))
+
+    legacy_approvals = read_approval_errors(base_root)
+    if legacy_approvals:
+        result = FullResult(
+            status="error",
+            summary=(
+                f"{len(legacy_approvals)} legacy approval format entr"
+                f"{'y' if len(legacy_approvals) == 1 else 'ies'} in .verify/approved "
+                "- re-approve with `actually-done approve <id>` on base"
+            ),
+            details="\n".join(legacy_approvals),
+        )
+        return result, evidence
+
     approved = read_approved(base_root)
 
     base_tests = _find_test_files(base_root, config.unit_test_path)
