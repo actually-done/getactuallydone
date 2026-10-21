@@ -33,7 +33,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -236,28 +235,31 @@ def test_record_attempt_survives_a_transient_lock(
 
 
 def test_fast_tier_does_not_depend_on_python_being_on_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """fast.py spawns pytest via sys.executable (an absolute path baked in at
-    interpreter startup), not a bare "python"/"python3" looked up on PATH - so
-    removing those from PATH must not affect it.
+    interpreter startup), not a bare "python"/"python3" looked up on PATH - a
+    stub that writes a marker file if invoked, placed first on PATH, proves this
+    without removing real PATH directories: on a stock Linux runner, git and the
+    system python3 can live in the very same directory (/usr/bin), so stripping
+    any directory that merely contains a python launcher can take git down with
+    it too. The marker lives outside tmp_path (which _init_base_repo turns into
+    a git repo) so it can't itself show up as an untracked change.
     """
     _init_base_repo(tmp_path)
     (tmp_path / "pkg.py").write_text("def add(a, b):\n    return a + b  # ok\n", encoding="utf-8")
 
-    # Drop only the PATH entries that actually hold a python/python3/py launcher,
-    # so git (needed by fast.run_fast_tier itself for `git status`) still resolves.
-    launcher_names = {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
-    stripped = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not any((Path(p) / name).is_file() for name in launcher_names)
-    )
-    monkeypatch.setenv("PATH", stripped)
-    assert shutil.which("python") is None
-    assert shutil.which("python3") is None
+    fake_bin = tmp_path_factory.mktemp("fakebin")
+    marker = tmp_path_factory.mktemp("marker") / "python-was-invoked"
+    for name in ("python", "python3", "py"):
+        stub = fake_bin / name
+        stub.write_text(f'#!/usr/bin/env bash\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]))
 
     result = fast.run_fast_tier(tmp_path, Config(unit_test_path="tests"))
+
+    assert not marker.exists(), "fast.py invoked a PATH-resolved python/python3/py stub"
     assert result.status == "pass"
 
 
