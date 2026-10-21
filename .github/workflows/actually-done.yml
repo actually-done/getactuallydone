@@ -55,37 +55,59 @@ jobs:
             echo "has_manifest=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The grader (actually-done itself, pytest, any test-tooling plugins) is
-      # installed from base's own manifest, never the PR's - a PR can't bump or
-      # patch its way around the thing that's grading it. See docs/DECISIONS.md.
-      - name: Install the grader from base
+      # The grader (actually-done itself, pytest) is installed from base's own
+      # manifest, never the PR's, into its OWN venv - never the PR's - and
+      # invoked afterward by absolute path. Not just "a PR can't bump or patch
+      # its way around the thing that's grading it" (true either way): a PR
+      # installed into the SAME environment as the grader could replace it
+      # outright - a package it ships named `actually-done`, a `.pth` file, or
+      # a `sitecustomize.py` can all override what `import actually_done`
+      # resolves to for anything sharing that environment, including the
+      # grader itself. A separate venv the PR's own install never touches
+      # closes that regardless of what the PR's install does. See
+      # docs/DECISIONS.md, D19/D20 - D20 reproduces exactly this attack
+      # against both the unisolated and isolated designs to confirm it.
+      - name: Create the grader's own venv, install actually-done from base
         if: steps.base-check.outputs.bootstrap == 'false' && steps.base-check.outputs.has_manifest == 'true'
-        working-directory: base
-        run: pip install -e ".[dev]"
+        run: |
+          python -m venv "$RUNNER_TEMP/grader-venv"
+          "$RUNNER_TEMP/grader-venv/bin/pip" install -e "./base[dev]"
 
       # base has no pyproject.toml to pin a grader version from (but does have
       # this workflow, so it's not a bootstrap base) - fall back to an unpinned
-      # pytest rather than skipping, so base's own tests still get checked for
-      # real. actually-done's own config already defaults sanely when
-      # [tool.actually-done] is missing too (config.py).
-      - name: Install a default grader (base has no manifest to pin from)
+      # pytest in the grader's own venv rather than skipping, so base's own
+      # tests still get checked for real. actually-done's own config already
+      # defaults sanely when [tool.actually-done] is missing too (config.py).
+      - name: Create the grader's own venv with a default (unpinned) grader
         if: steps.base-check.outputs.bootstrap == 'false' && steps.base-check.outputs.has_manifest == 'false'
-        run: pip install pytest
+        run: |
+          python -m venv "$RUNNER_TEMP/grader-venv"
+          "$RUNNER_TEMP/grader-venv/bin/pip" install pytest
 
-      # The PR's own runtime dependencies still need to be present so the sandboxed
-      # test run can import the PR's production code. Adjust this if your project
-      # isn't pip-installable as-is.
-      - name: Install PR runtime dependencies
+      # The PR's own runtime dependencies go into a SEPARATE venv from the
+      # grader's - never shared - so the sandboxed test run can still import
+      # the PR's production code, without the PR's own install ever sharing an
+      # environment (and so a site-packages, a .pth, or any import machinery)
+      # with the grader. pytest itself runs IN this venv, not the grader's -
+      # pinned to the exact version the grader's own venv resolved, read back
+      # via `pip freeze`, so a PR can't supply a different pytest either.
+      # Adjust the `pip install -e ./pr` line if your project isn't
+      # pip-installable as-is.
+      - name: Create the PR's own venv with its deps and a matching pytest
         if: steps.base-check.outputs.bootstrap == 'false'
-        working-directory: pr
-        run: pip install -e .
+        run: |
+          python -m venv "$RUNNER_TEMP/pr-venv"
+          "$RUNNER_TEMP/pr-venv/bin/pip" install -e ./pr
+          "$RUNNER_TEMP/grader-venv/bin/pip" freeze | grep -i '^pytest==' > "$RUNNER_TEMP/pytest-pin.txt"
+          "$RUNNER_TEMP/pr-venv/bin/pip" install -r "$RUNNER_TEMP/pytest-pin.txt"
 
       - name: Run full-tier verification
         if: steps.base-check.outputs.bootstrap == 'false'
         working-directory: pr
         run: |
           set -o pipefail
-          actually-done verify --tier full --base ../base | tee ../evidence.md
+          "$RUNNER_TEMP/grader-venv/bin/actually-done" verify --tier full --base ../base \
+            --python "$RUNNER_TEMP/pr-venv/bin/python" | tee ../evidence.md
 
       - name: Note the bootstrap skip
         if: steps.base-check.outputs.bootstrap == 'true'

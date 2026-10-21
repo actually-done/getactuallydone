@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from actually_done import cli
+from actually_done import cli, full
 
 
 def _run_pre_bash(
@@ -273,6 +273,37 @@ def test_approve_writes_verify_approved(repo: Path, capsys: pytest.CaptureFixtur
     content = (repo / ".verify" / "approved").read_text(encoding="utf-8")
     assert "tests/test_pkg.py::test_add" in content
     assert "approved 1 test id(s)" in capsys.readouterr().out
+
+
+def test_approve_to_ref_binds_both_base_and_new_content_hash(repo: Path) -> None:
+    """`--to <ref>` hashes the file's content AT that ref - not the working
+    tree's current content - as the approved NEW version, writing a
+    three-field entry (base hash + approved new hash), distinct from the
+    working-tree-only two-field form the other approve tests exercise.
+    """
+    base_hash = full.file_hash(repo / "tests" / "test_pkg.py")
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("checkout", "-q", "-b", "fix-branch")
+    fixed_content = (
+        "import sys\nsys.path.insert(0, '.')\nfrom pkg import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n    assert add(2, 2) == 4\n"
+    )
+    (repo / "tests" / "test_pkg.py").write_text(fixed_content, encoding="utf-8")
+    expected_new_hash = full.file_hash(repo / "tests" / "test_pkg.py")
+    git("add", "-A")
+    git("commit", "-q", "-m", "fix")
+    fixed_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-q", "-")  # back to the original branch, original content
+
+    assert full.file_hash(repo / "tests" / "test_pkg.py") == base_hash  # confirm restored
+
+    exit_code = cli.main(["approve", "--to", fixed_sha, "tests/test_pkg.py::test_add"])
+    assert exit_code == 0
+    content = (repo / ".verify" / "approved").read_text(encoding="utf-8")
+    assert content.strip() == f"tests/test_pkg.py::test_add {base_hash} {expected_new_hash}"
 
 
 def test_approve_is_additive(repo: Path) -> None:

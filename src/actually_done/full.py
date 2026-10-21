@@ -70,61 +70,121 @@ class Evidence:
     failing_tests: tuple[tuple[str, str], ...] = ()
 
 
+def hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hash_bytes(path.read_bytes())
 
 
-def _parse_approved(base_root: Path) -> tuple[set[str], list[str]]:
-    """Returns (valid approved ids, legacy/malformed entry text) from base's
-    `.verify/approved`. Each valid entry is `<test id> <sha256>`, bound to the
-    content of the file it names at approval time (`actually-done approve`,
-    cli.py's `_cmd_approve`) and re-verified against base's CURRENT content here
-    - a file that no longer matches its recorded hash (edited, or deleted and
-    recreated) voids that one entry: not "approved with a stale binding,"
-    simply not approved, so the test runs for real again.
+@dataclass(frozen=True)
+class Approvals:
+    """Parsed, validated `.verify/approved`, from `_parse_approved` - see there
+    for the format and the reasoning behind each category.
+    """
 
-    Binding closes a real gap: matching on the id string alone would let one
-    approval, once merged, cover ANY future test that happens to share that
-    exact id - including a file deleted and later recreated at the same path
-    (a new file, so common_tests' "base's content always wins" lock doesn't
-    apply to it at all), or a stale entry whose original file is long gone
-    quietly discounting the required test count for an unrelated deletion
-    forever (`expected_minimum = baseline_count - len(approved)`).
+    deselected: frozenset[str] = frozenset()
+    accepted_edit_files: frozenset[str] = frozenset()
+    mismatched: tuple[str, ...] = ()
+    legacy: tuple[str, ...] = ()
 
-    A line that isn't `<id> <hash>` at all - almost always a leftover from
-    before approvals were bound to content - is neither silently honored NOR
-    silently dropped: `run_full_tier` fails loudly on any legacy entry rather
-    than letting a human discover later that an approval they thought was in
-    effect never actually was.
+
+def _parse_approved(base_root: Path, pr_root: Path) -> Approvals:
+    """Each `.verify/approved` line is one of:
+
+      `<test id> <base sha256>`                       - approved for removal/skip
+      `<test id> <base sha256> <approved new sha256>`  - approved EDIT
+
+    Both forms are bound to base's content at approval time (`actually-done
+    approve` / `--to <ref>`, cli.py's `_cmd_approve`) and re-verified against
+    base's CURRENT content here - a base file that no longer matches its
+    recorded hash (edited further, or deleted and recreated) voids that entry
+    outright: not "approved with a stale binding," simply not approved, so the
+    test runs for real again. This closes a real gap: matching on the id
+    string alone would let one approval, once merged, cover ANY future test
+    that happens to share that exact id - including a file deleted and later
+    recreated at the same path (a new file, so common_tests' "base's content
+    always wins" lock doesn't apply to it at all), or a stale entry whose
+    original file is long gone quietly discounting the required test count for
+    an unrelated deletion forever.
+
+    The two-field form means exactly what it did before: `deselected` test ids
+    are excluded from the run entirely (D18).
+
+    The three-field form approves a SPECIFIC edit - not just "don't run this,"
+    but "accept exactly this new content as a replacement for base's, and run
+    it for real." `common_tests`' lock (base's content always wins for a file
+    that exists on both sides) has one narrow exception for these:
+    `accepted_edit_files` names the ones where the PR's CURRENT content
+    matches the approved new hash exactly, so `run_full_tier` lets the PR's
+    version through instead of overwriting it with base's. If the PR's content
+    matches NEITHER the base hash (untouched) NOR the approved new hash (the
+    approved edit), that's a PR that changed an approved-edit test to
+    something nobody signed off on - `mismatched` surfaces it so
+    `run_full_tier` can fail loudly, not silently fall back to base's content
+    as if nothing were wrong.
+
+    A line that isn't one of the two valid shapes at all - almost always a
+    leftover from before approvals were bound to content - is neither silently
+    honored NOR silently dropped: `legacy` surfaces it the same way, so
+    `run_full_tier` fails loudly rather than letting a human discover later
+    that an approval they thought was in effect never actually was.
     """
     path = base_root / ".verify" / "approved"
     if not path.is_file():
-        return set(), []
-    approved: set[str] = set()
+        return Approvals()
+
+    deselected: set[str] = set()
+    accepted_edit_files: set[str] = set()
+    mismatched: list[str] = []
     legacy: list[str] = []
+
     for line in path.read_text(encoding="utf-8").splitlines():
         entry = line.split("#", 1)[0].strip()
         if not entry:
             continue
         parts = entry.split()
-        if len(parts) != 2:
+        if len(parts) not in (2, 3):
             legacy.append(entry)
             continue
-        test_id, recorded_hash = parts
-        file_path = base_root / test_id.split("::", 1)[0]
-        if file_path.is_file() and file_hash(file_path) == recorded_hash:
-            approved.add(test_id)
-    return approved, legacy
+
+        test_id, base_hash = parts[0], parts[1]
+        file_rel = test_id.split("::", 1)[0]
+        base_file = base_root / file_rel
+        if not (base_file.is_file() and file_hash(base_file) == base_hash):
+            continue  # stale - base has moved past what was approved; void
+
+        if len(parts) == 2:
+            deselected.add(test_id)
+            continue
+
+        new_hash = parts[2]
+        pr_file = pr_root / file_rel
+        pr_hash = file_hash(pr_file) if pr_file.is_file() else None
+        if pr_hash == new_hash:
+            accepted_edit_files.add(file_rel)
+        elif pr_hash is not None and pr_hash != base_hash:
+            mismatched.append(test_id)
+        # else: the PR hasn't touched the file (still == base_hash) or deleted
+        # it - no-op, ordinary locking/count-drop handling applies as usual.
+
+    return Approvals(
+        deselected=frozenset(deselected),
+        accepted_edit_files=frozenset(accepted_edit_files),
+        mismatched=tuple(mismatched),
+        legacy=tuple(legacy),
+    )
 
 
-def read_approved(base_root: Path) -> set[str]:
-    """Test ids currently validly approved - see `_parse_approved`."""
-    return _parse_approved(base_root)[0]
+def read_approved(base_root: Path, pr_root: Path) -> set[str]:
+    """Test ids approved for removal/skip - see `_parse_approved`."""
+    return set(_parse_approved(base_root, pr_root).deselected)
 
 
-def read_approval_errors(base_root: Path) -> list[str]:
+def read_approval_errors(base_root: Path, pr_root: Path) -> list[str]:
     """Legacy/malformed `.verify/approved` entries - see `_parse_approved`."""
-    return _parse_approved(base_root)[1]
+    return list(_parse_approved(base_root, pr_root).legacy)
 
 
 @contextmanager
@@ -156,29 +216,55 @@ def materialize_base(pr_root: Path, base: str) -> Iterator[Path]:
 
 
 def run_full_tier(
-    pr_root: Path, base_root: Path, config: Config, base_ref: str = ""
+    pr_root: Path,
+    base_root: Path,
+    config: Config,
+    base_ref: str = "",
+    python: str | None = None,
 ) -> tuple[FullResult, Evidence]:
+    """`python`: the interpreter that actually runs the PR's test suite - defaults
+    to `sys.executable` (this process's own), correct for local/single-environment
+    use. Pass an explicit path when the grader itself runs isolated from the PR's
+    installed dependencies (CI: the grader is installed from base into its own
+    venv and invoked by absolute path specifically so a PR can't shadow it with a
+    same-named package, a `.pth` file, or a `sitecustomize.py` sharing its
+    environment - see docs/DECISIONS.md, D19/D20 - and that isolated grader needs
+    a *different* interpreter, one with the PR's own dependencies installed, to
+    actually run the PR's tests).
+    """
     evidence = Evidence(base_ref=base_ref or str(base_root), pr_commit=_rev_parse(pr_root))
 
-    legacy_approvals = read_approval_errors(base_root)
-    if legacy_approvals:
+    approvals = _parse_approved(base_root, pr_root)
+    if approvals.legacy:
         result = FullResult(
             status="error",
             summary=(
-                f"{len(legacy_approvals)} legacy approval format entr"
-                f"{'y' if len(legacy_approvals) == 1 else 'ies'} in .verify/approved "
+                f"{len(approvals.legacy)} legacy approval format entr"
+                f"{'y' if len(approvals.legacy) == 1 else 'ies'} in .verify/approved "
                 "- re-approve with `actually-done approve <id>` on base"
             ),
-            details="\n".join(legacy_approvals),
+            details="\n".join(approvals.legacy),
         )
         return result, evidence
 
-    approved = read_approved(base_root)
+    if approvals.mismatched:
+        result = FullResult(
+            status="fail",
+            summary=(
+                f"{len(approvals.mismatched)} test(s) have an approved-edit entry "
+                "in .verify/approved whose content no longer matches the PR - "
+                "re-approve with `actually-done approve --to <ref> <id>` on base"
+            ),
+            details="\n".join(approvals.mismatched),
+        )
+        return result, evidence
+
+    approved = set(approvals.deselected)
 
     base_tests = _find_test_files(base_root, config.unit_test_path)
     pr_tests = _find_test_files(pr_root, config.unit_test_path)
     new_tests = pr_tests - base_tests
-    common_tests = base_tests & pr_tests
+    common_tests = (base_tests & pr_tests) - approvals.accepted_edit_files
     evidence.new_test_files = len(new_tests)
 
     skip_violations = sorted(
@@ -198,11 +284,11 @@ def run_full_tier(
         sandbox = Path(tmp) / "sandbox"
         _build_sandbox(sandbox, pr_root, base_root, config, common_tests)
 
-        baseline_count = _collect_count(base_root, config.unit_test_path, evidence)
+        baseline_count = _collect_count(base_root, config.unit_test_path, evidence, python)
 
         junit_path = Path(tmp) / "junit-unit.xml"
         returncode, output = _run_pytest(
-            sandbox, config.unit_test_path, junit_path, evidence, deselect=approved
+            sandbox, config.unit_test_path, junit_path, evidence, deselect=approved, python=python
         )
         report = _parse_junit(junit_path)
         evidence.tests_collected = report.tests
@@ -237,7 +323,12 @@ def run_full_tier(
         if oracle_dir.is_dir() and any(oracle_dir.rglob("test_*.py")):
             oracle_junit = Path(tmp) / "junit-oracle.xml"
             oracle_rc, oracle_output = _run_pytest(
-                sandbox, "tests/oracle", oracle_junit, evidence, extra_args=["--runxfail"]
+                sandbox,
+                "tests/oracle",
+                oracle_junit,
+                evidence,
+                extra_args=["--runxfail"],
+                python=python,
             )
             if oracle_rc != 0:
                 evidence.failing_tests = _parse_junit(oracle_junit).failing
@@ -380,14 +471,16 @@ def _pytest_env() -> dict[str, str]:
     return env
 
 
-def _collect_count(cwd: Path, unit_test_path: str, evidence: Evidence) -> int:
+def _collect_count(
+    cwd: Path, unit_test_path: str, evidence: Evidence, python: str | None = None
+) -> int:
     """Collect-only test count, run with `cwd` set so relative imports (`from pkg
     import ...`) resolve against that tree's own production code - not whatever
     directory the calling process happened to be in."""
     if not (cwd / unit_test_path).is_dir():
         return 0
     command = [
-        sys.executable,
+        python or sys.executable,
         "-m",
         "pytest",
         "--collect-only",
@@ -412,9 +505,10 @@ def _run_pytest(
     evidence: Evidence,
     deselect: set[str] | None = None,
     extra_args: list[str] | None = None,
+    python: str | None = None,
 ) -> tuple[int, str]:
     command = [
-        sys.executable,
+        python or sys.executable,
         "-m",
         "pytest",
         "-q",
