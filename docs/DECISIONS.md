@@ -271,6 +271,12 @@ While triaging D15's three pre-existing test-only failures, two of them (`test_r
 
 **Decision:** `_parse_junit` now extracts every `<testcase>` with a `<failure>`/`<error>` child directly from the JUnit report (`_junit_failures`) - each test's id (`file::name` when pytest's `--junitxml` provides a `file` attribute, else `classname::name`, since this project's pytest version doesn't emit one) and the first non-blank line of its message. `Evidence.failing_tests` carries this, and `render_evidence_markdown` renders it unconditionally, before the existing tail - so every failing test and a real summary of what broke survives regardless of how much other output precedes it, with the raw tail still available underneath for full context. New test: `test_full.py::test_failing_test_evidence_survives_output_truncation`.
 
+## D17: `setup_github.sh`'s `sed -i` wasn't portable to macOS
+
+Caught immediately by the new `ci.yml` matrix (D15/D16's own motivation): 7 of `test_setup_github_sh.py`'s tests failed on `macos-latest` only, all with `sed: 1: "...": invalid command code v`. Root cause: `sed -i "s/.../.../" "$file"` is a classic GNU-vs-BSD portability trap - GNU sed (Linux, what this project had only ever run on) accepts a bare `-i` with no backup suffix; BSD sed (macOS) requires `-i ''` as a *separate* argument and otherwise treats the next argument (here, the sed script itself) as the backup suffix, then tries to parse the file path as the actual script - hence "invalid command code v" (from a `v` somewhere in the runner's temp path).
+
+**Decision:** replaced `sed -i ... "$file"` with `sed ... "$file" > "$file.tmp" && mv "$file.tmp" "$file"`, sidestepping the `-i` flag's incompatible spellings entirely rather than trying to detect which sed flavor is running. Works identically on GNU, BSD, and Windows Git Bash. No new test needed - the existing `test_setup_github_sh.py` suite already exercises this path; it just needed to actually run on macOS once, which `ci.yml` now ensures happens on every PR.
+
 ## Not re-verified (out of scope for v0.1, noted for ROADMAP)
 
 Mutation testing, size/complexity/duplication gates, held-out tests, and multi-agent adapters (Cursor/Codex/Copilot hook formats) are explicitly out of scope per the build prompt and were not researched against their respective docs. If a future version adds them, re-fetch Cursor's and Copilot's hook references rather than trusting solution.md's summaries, since only Claude Code's docs were verified here.

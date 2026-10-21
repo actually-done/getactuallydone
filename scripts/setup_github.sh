@@ -233,7 +233,14 @@ fi
 if ! grep -q "@YOUR-GITHUB-USERNAME" "$CODEOWNERS_FILE"; then
   echo "No @YOUR-GITHUB-USERNAME placeholder found in $CODEOWNERS_FILE - already replaced, nothing to do." >&2
 else
-  sed -i "s/@YOUR-GITHUB-USERNAME/@$GITHUB_USERNAME/g" "$CODEOWNERS_FILE"
+  # `sed -i` itself isn't portable: GNU sed (Linux) takes a bare `-i` with no
+  # backup, BSD sed (macOS) requires `-i ''` as a separate argument - each
+  # misparses the other's spelling (BSD treats a bare `-i`'s next argument as
+  # the backup suffix, not the script; GNU treats `-i ''`'s `''` as the script
+  # itself, not a suffix). Writing to a temp file and moving it into place
+  # sidesteps the -i flag entirely, so it works identically everywhere.
+  sed "s/@YOUR-GITHUB-USERNAME/@$GITHUB_USERNAME/g" "$CODEOWNERS_FILE" > "$CODEOWNERS_FILE.tmp"
+  mv "$CODEOWNERS_FILE.tmp" "$CODEOWNERS_FILE"
   echo "Updated $CODEOWNERS_FILE: @YOUR-GITHUB-USERNAME -> @$GITHUB_USERNAME." >&2
   echo "This is a normal file edit, not committed for you - review and commit it yourself:" >&2
   echo "  git diff CODEOWNERS" >&2
